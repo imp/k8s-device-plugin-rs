@@ -1,0 +1,6 @@
+[package]
+name = "k8s-device-plugin"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
