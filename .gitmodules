@@ -1,0 +1,3 @@
+[submodule "kubelet"]
+	path = kubelet
+	url = https://github.com/kubernetes/kubelet.git
