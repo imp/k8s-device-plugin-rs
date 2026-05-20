@@ -163,7 +163,7 @@ impl DevicePlugin {
     pub async fn serve(
         &self,
         socket_name: &str,
-        bound: Arc<tokio::sync::Notify>,
+        ready: Arc<tokio::sync::Notify>,
     ) -> tonic::Result<()> {
         use tokio::net::UnixListener;
         use tokio_stream::wrappers::UnixListenerStream;
@@ -174,17 +174,15 @@ impl DevicePlugin {
             fs::remove_file(&endpoint).map_err(|e| tonic::Status::internal(e.to_string()))?;
         }
 
-        let uds =
-            UnixListener::bind(endpoint).map_err(|e| tonic::Status::internal(e.to_string()))?;
+        let uds = UnixListener::bind(endpoint)
+            .map(UnixListenerStream::new)
+            .map_err(|e| tonic::Status::internal(e.to_string()))?;
 
-        bound.notify_one();
+        ready.notify_one();
 
-        let uds = UnixListenerStream::new(uds);
-
-        let inner = self.service.clone();
-        let service = v1beta1::DevicePluginServer::from_arc(inner);
+        let svc = self.service();
         transport::Server::builder()
-            .add_service(service)
+            .add_service(svc)
             .serve_with_incoming(uds)
             .await
             .map_err(|e| tonic::Status::from_error(Box::new(e)))
@@ -215,6 +213,11 @@ impl DevicePlugin {
 
     fn kubelet_socket_path() -> String {
         String::from(v1beta1::DEVICE_PLUGIN_PATH) + v1beta1::KUBELET_SOCKET
+    }
+
+    fn service(&self) -> v1beta1::DevicePluginServer<DevicePluginService> {
+        let inner = Arc::clone(&self.service);
+        v1beta1::DevicePluginServer::from_arc(inner)
     }
 }
 
@@ -268,9 +271,8 @@ impl v1beta1::DevicePlugin for DevicePluginService {
         &self,
         _request: tonic::Request<v1beta1::PreferredAllocationRequest>,
     ) -> tonic::Result<tonic::Response<v1beta1::PreferredAllocationResponse>> {
-        Err(tonic::Status::unimplemented(
-            "GetPreferredAllocation not implemented",
-        ))
+        let status = tonic::Status::unimplemented("GetPreferredAllocation not implemented");
+        Err(status)
     }
 
     async fn allocate(
