@@ -1,0 +1,29 @@
+[tasks.build]
+description = "Build the CLI"
+run = "cargo build"
+# `mise run b`
+alias = "b"
+
+[tasks.test]
+description = "Run automated tests"
+run = "cargo nextest run --workspace"
+# run in user's cwd, default is the project's base directory
+dir = "{{cwd}}"
+
+[tasks.clippy]
+description = "Lint with clippy --all-targets"
+env = { RUST_BACKTRACE = "1" }  # env vars for the script
+run = "cargo clippy --workspace --all-targets"
+
+[tasks.lint]
+description = "Lint with clippy"
+env = { RUST_BACKTRACE = "1" }  # env vars for the script
+# you can specify a multiline script instead of individual commands
+run = '''
+#!/usr/bin/env bash
+cargo clippy
+'''
+
+[tasks.deps]
+description = "Update dependencies"
+run = ["cargo update", 'git commit -m "Update deps" Cargo.lock']
