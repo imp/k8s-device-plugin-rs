@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::io;
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use tokio::task::JoinHandle;
 use tonic::Result;
 use tonic::transport;
 use tonic::transport::Channel;
@@ -136,59 +138,59 @@ impl DevicePlugin {
         Self { service }
     }
 
-    #[cfg(unix)]
     pub async fn start(&self, socket_name: &str, resource_name: &str) -> tonic::Result<()> {
+        let endpoint = String::from(v1beta1::DEVICE_PLUGIN_PATH) + socket_name;
         loop {
             self.service.kubelet_gone.notify_waiters();
-
-            let this = self.clone();
-            let name = socket_name.to_string();
-            let bound = Arc::new(tokio::sync::Notify::new());
-            let bound_notify = Arc::clone(&bound);
-            let handle = tokio::spawn(async move { this.serve(&name, bound_notify).await });
-
-            // Wait until the socket is bound and ready to accept connections
-            bound.notified().await;
-
-            Self::register(socket_name, resource_name).await?;
-
+            let handle = self
+                .spawn_server(&endpoint)
+                .await
+                .map_err(|e| tonic::Status::internal(e.to_string()))?;
+            Self::register(&endpoint, resource_name).await?;
             // Block until list_and_watch client disconnects — that signals a kubelet restart
             self.service.kubelet_gone.notified().await;
-
             handle.abort();
+
+            // let this = self.clone();
+            // let name = socket_name.to_string();
+            // let bound = Arc::new(tokio::sync::Notify::new());
+            // let bound_notify = Arc::clone(&bound);
+            // let handle = tokio::spawn(async move { this.serve(&name, bound_notify).await });
+
+            // // Wait until the socket is bound and ready to accept connections
+            // bound.notified().await;
+
+            // Self::register(socket_name, resource_name).await?;
+
+            // // Block until list_and_watch client disconnects — that signals a kubelet restart
+            // self.service.kubelet_gone.notified().await;
+
+            // handle.abort();
         }
     }
 
-    #[cfg(unix)]
-    pub async fn serve(
+    async fn spawn_server(
         &self,
         socket_name: &str,
-        ready: Arc<tokio::sync::Notify>,
-    ) -> tonic::Result<()> {
+    ) -> io::Result<JoinHandle<Result<(), transport::Error>>> {
         use tokio::net::UnixListener;
         use tokio_stream::wrappers::UnixListenerStream;
 
         let endpoint = String::from(v1beta1::DEVICE_PLUGIN_PATH) + socket_name;
-
-        if Path::new(&endpoint).exists() {
-            fs::remove_file(&endpoint).map_err(|e| tonic::Status::internal(e.to_string()))?;
-        }
-
-        let uds = UnixListener::bind(endpoint)
-            .map(UnixListenerStream::new)
-            .map_err(|e| tonic::Status::internal(e.to_string()))?;
-
-        ready.notify_one();
+        ensure_no_file(&endpoint)?;
+        let uds = UnixListener::bind(endpoint).map(UnixListenerStream::new)?;
 
         let svc = self.service();
-        transport::Server::builder()
-            .add_service(svc)
-            .serve_with_incoming(uds)
-            .await
-            .map_err(|e| tonic::Status::from_error(Box::new(e)))
+        let router = transport::Server::builder().add_service(svc);
+        let handle = tokio::spawn(router.serve_with_incoming(uds));
+
+        Ok(handle)
     }
 
-    pub async fn register(endpoint: &str, resource_name: &str) -> tonic::Result<()> {
+    pub async fn register(
+        endpoint: &str,
+        resource_name: &str,
+    ) -> tonic::Result<tonic::Response<v1beta1::Empty>> {
         let version = v1beta1::VERSION.to_string();
         let endpoint = endpoint.to_string();
         let resource_name = resource_name.to_string();
@@ -200,9 +202,7 @@ impl DevicePlugin {
             options: None,
         };
 
-        Self::registration_client().await?.register(request).await?;
-
-        Ok(())
+        Self::registration_client().await?.register(request).await
     }
 
     async fn registration_client() -> tonic::Result<v1beta1::RegistrationClient<Channel>> {
@@ -320,6 +320,13 @@ impl v1beta1::DevicePlugin for DevicePluginService {
             "PreStartContainer not implemented",
         ))
     }
+}
+
+fn ensure_no_file(path: &str) -> io::Result<()> {
+    if fs::exists(path)? {
+        fs::remove_file(path)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
