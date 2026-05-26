@@ -12,3 +12,7 @@ tonic.workspace = true
 
 k8s-device-plugin-core.workspace = true
 k8s-device-plugin-proto.workspace = true
+
+
+[lints]
+workspace = true

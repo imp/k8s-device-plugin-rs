@@ -6,3 +6,7 @@ repository.workspace = true
 
 
 [dependencies]
+
+
+[lints]
+workspace = true

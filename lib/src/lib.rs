@@ -6,7 +6,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::task::JoinHandle;
-use tonic::Result;
 use tonic::transport;
 use tonic::transport::Channel;
 
@@ -176,7 +175,7 @@ impl DevicePluginService {
 #[tonic::async_trait]
 impl v1beta1::DevicePlugin for DevicePluginService {
     type ListAndWatchStream =
-        tokio_stream::wrappers::ReceiverStream<Result<v1beta1::ListAndWatchResponse>>;
+        tokio_stream::wrappers::ReceiverStream<tonic::Result<v1beta1::ListAndWatchResponse>>;
 
     async fn get_device_plugin_options(
         &self,
