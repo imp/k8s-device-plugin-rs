@@ -1,0 +1,14 @@
+[package]
+name = "k8s-device-plugin-lib"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+
+[dependencies]
+tokio.workspace = true
+tokio-stream.workspace = true
+tonic.workspace = true
+
+k8s-device-plugin-core.workspace = true
+k8s-device-plugin-proto.workspace = true

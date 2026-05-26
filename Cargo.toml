@@ -1,12 +1,6 @@
-[package]
-name = "k8s-device-plugin"
-version = "0.1.0"
-edition = "2024"
-
-
 [workspace]
 resolver = "3"
-members = ["proto"]
+members = ["core", "lib", "proto"]
 
 
 [workspace.package]
@@ -15,22 +9,14 @@ edition = "2024"
 repository = "https://github.com/imp/k8s-device-plugin-rs"
 
 
-[dependencies]
+[workspace.dependencies]
 prost = "0.14"
-tokio = {
-  version = "1.52",
-  features = [
-    "macros",
-    "net",
-    "rt-multi-thread",
-    "sync",
-    "time",
-  ]
-}
+tokio = { version = "1.52", features = ["macros"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tonic = "0.14"
 tonic-prost = "0.14"
-
-
-[build-dependencies]
 tonic-prost-build = "0.14"
+
+k8s-device-plugin-core = { path = "core" }
+k8s-device-plugin-lib = { path = "lib" }
+k8s-device-plugin-proto = { path = "proto" }

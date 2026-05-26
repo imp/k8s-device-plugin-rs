@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -9,84 +10,20 @@ use tonic::Result;
 use tonic::transport;
 use tonic::transport::Channel;
 
-pub mod v1beta1 {
-    use std::fmt;
+use k8s_device_plugin_proto as proto;
+pub use proto::v1beta1;
 
-    #[derive(Debug, Clone)]
-    pub enum Health {
-        Healthy,
-        Unhealthy,
-    }
+pub use health::Health;
+pub use permissions::DevicePermissions;
 
-    impl Health {
-        pub fn as_str(&self) -> &'static str {
-            match self {
-                Self::Healthy => HEALTHY,
-                Self::Unhealthy => UNHEALTHY,
-            }
-        }
-    }
-
-    impl fmt::Display for Health {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            self.as_str().fmt(f)
-        }
-    }
-
-    #[derive(Debug, Clone, Copy)]
-    pub struct DevicePermissions {
-        pub read: bool,
-        pub write: bool,
-        pub mknod: bool,
-    }
-
-    impl DevicePermissions {
-        pub fn as_str(&self) -> &'static str {
-            match (self.read, self.write, self.mknod) {
-                (true, true, true) => "rwm",
-                (true, true, false) => "rw",
-                (true, false, true) => "rm",
-                (true, false, false) => "r",
-                (false, true, true) => "wm",
-                (false, true, false) => "w",
-                (false, false, true) => "m",
-                (false, false, false) => "",
-            }
-        }
-    }
-
-    impl fmt::Display for DevicePermissions {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            self.as_str().fmt(f)
-        }
-    }
-
-    pub const HEALTHY: &str = "Healthy";
-    pub const UNHEALTHY: &str = "Unhealthy";
-    pub const VERSION: &str = "v1beta1";
-
-    #[cfg(not(windows))]
-    pub const DEVICE_PLUGIN_PATH: &str = "/var/lib/kubelet/device-plugins/";
-    #[cfg(windows)]
-    pub const DEVICE_PLUGIN_PATH: &str = "\\var\\lib\\kubelet\\device-plugins\\";
-
-    pub const KUBELET_SOCKET: &str = "kubelet.sock";
-
-    // const KUBELET_PRE_START_CONTAINER_RPC_TIMEOUT_IN_SECS: u64 = 30;
-
-    pub use device_plugin_server::DevicePlugin;
-    pub use device_plugin_server::DevicePluginServer;
-    pub use device_plugin_server::SERVICE_NAME;
-    pub use registration_client::RegistrationClient;
-
-    tonic::include_proto!("v1beta1");
-}
+mod health;
+mod permissions;
 
 #[derive(Debug, Clone)]
 pub struct DevicePath {
     pub host_path: PathBuf,
     pub container_path: PathBuf,
-    pub permissions: v1beta1::DevicePermissions,
+    pub permissions: DevicePermissions,
 }
 
 impl From<DevicePath> for v1beta1::DeviceSpec {
@@ -102,7 +39,7 @@ impl From<DevicePath> for v1beta1::DeviceSpec {
 #[derive(Debug, Clone)]
 pub struct Device {
     pub id: String,
-    pub health: v1beta1::Health,
+    pub health: Health,
     pub paths: Vec<DevicePath>,
 }
 
@@ -341,62 +278,10 @@ mod tests {
     }
 
     #[test]
-    fn health_as_str() {
-        assert_eq!(v1beta1::Health::Healthy.as_str(), v1beta1::HEALTHY);
-        assert_eq!(v1beta1::Health::Unhealthy.as_str(), v1beta1::UNHEALTHY);
-    }
-
-    #[test]
-    fn health_display() {
-        assert_eq!(v1beta1::Health::Healthy.to_string(), v1beta1::HEALTHY);
-        assert_eq!(v1beta1::Health::Unhealthy.to_string(), v1beta1::UNHEALTHY);
-    }
-
-    #[test]
-    fn device_permissions_as_str() {
-        assert_eq!(
-            v1beta1::DevicePermissions {
-                read: true,
-                write: true,
-                mknod: true
-            }
-            .as_str(),
-            "rwm"
-        );
-        assert_eq!(
-            v1beta1::DevicePermissions {
-                read: true,
-                write: true,
-                mknod: false
-            }
-            .as_str(),
-            "rw"
-        );
-        assert_eq!(
-            v1beta1::DevicePermissions {
-                read: true,
-                write: false,
-                mknod: false
-            }
-            .as_str(),
-            "r"
-        );
-        assert_eq!(
-            v1beta1::DevicePermissions {
-                read: false,
-                write: false,
-                mknod: false
-            }
-            .as_str(),
-            ""
-        );
-    }
-
-    #[test]
     fn device_to_proto() {
         let device = Device {
             id: "dev-0".to_string(),
-            health: v1beta1::Health::Healthy,
+            health: Health::Healthy,
             paths: vec![],
         };
         let proto = device.to_proto();
@@ -408,15 +293,11 @@ mod tests {
     fn device_to_device_specs() {
         let device = Device {
             id: "dev-0".to_string(),
-            health: v1beta1::Health::Healthy,
+            health: Health::Healthy,
             paths: vec![DevicePath {
                 host_path: PathBuf::from("/dev/mydev0"),
                 container_path: PathBuf::from("/dev/mydev0"),
-                permissions: v1beta1::DevicePermissions {
-                    read: true,
-                    write: true,
-                    mknod: false,
-                },
+                permissions: DevicePermissions::rdwr(),
             }],
         };
         let specs = device.to_device_specs();
@@ -429,15 +310,11 @@ mod tests {
     fn make_service() -> DevicePluginService {
         let device = Device {
             id: "dev-0".to_string(),
-            health: v1beta1::Health::Healthy,
+            health: Health::Healthy,
             paths: vec![DevicePath {
                 host_path: PathBuf::from("/dev/mydev0"),
                 container_path: PathBuf::from("/dev/mydev0"),
-                permissions: v1beta1::DevicePermissions {
-                    read: true,
-                    write: true,
-                    mknod: false,
-                },
+                permissions: DevicePermissions::rdwr(),
             }],
         };
         DevicePluginService::new(HashMap::from([("dev-0".to_string(), device)]))

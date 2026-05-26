@@ -1,0 +1,8 @@
+[package]
+name = "k8s-device-plugin-core"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+
+[dependencies]
