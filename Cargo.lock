@@ -385,6 +385,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "k8s-device-plugin-proto"
+version = "0.0.1"
+
+[[package]]
 name = "leb128fmt"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
