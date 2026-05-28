@@ -5,7 +5,10 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use tokio::net::UnixListener;
 use tokio::task::JoinHandle;
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport;
 use tonic::transport::Channel;
 
@@ -14,9 +17,11 @@ pub use proto::v1beta1;
 
 pub use health::Health;
 pub use permissions::DevicePermissions;
+pub use registration::RegistrationClient;
 
 mod health;
 mod permissions;
+mod registration;
 
 #[derive(Debug, Clone)]
 pub struct DevicePath {
@@ -65,90 +70,65 @@ impl Device {
 
 #[derive(Clone, Debug)]
 pub struct DevicePlugin {
+    endpoint: String,
+    resource_name: String,
     service: Arc<DevicePluginService>,
 }
 
 impl DevicePlugin {
-    pub fn new(service: DevicePluginService) -> Self {
+    pub fn new(resource_name: &str, service: DevicePluginService) -> Self {
+        let socket_name = sanitize_socket_name(resource_name);
+        let resource_name = resource_name.to_string();
+        let endpoint = String::from(v1beta1::DEVICE_PLUGIN_PATH) + &socket_name;
         let service = Arc::new(service);
-        Self { service }
-    }
-
-    pub async fn start(&self, socket_name: &str, resource_name: &str) -> tonic::Result<()> {
-        let endpoint = String::from(v1beta1::DEVICE_PLUGIN_PATH) + socket_name;
-        loop {
-            self.service.kubelet_gone.notify_waiters();
-            let handle = self
-                .spawn_server(&endpoint)
-                .await
-                .map_err(|e| tonic::Status::internal(e.to_string()))?;
-            Self::register(&endpoint, resource_name).await?;
-            // Block until list_and_watch client disconnects — that signals a kubelet restart
-            self.service.kubelet_gone.notified().await;
-            handle.abort();
-
-            // let this = self.clone();
-            // let name = socket_name.to_string();
-            // let bound = Arc::new(tokio::sync::Notify::new());
-            // let bound_notify = Arc::clone(&bound);
-            // let handle = tokio::spawn(async move { this.serve(&name, bound_notify).await });
-
-            // // Wait until the socket is bound and ready to accept connections
-            // bound.notified().await;
-
-            // Self::register(socket_name, resource_name).await?;
-
-            // // Block until list_and_watch client disconnects — that signals a kubelet restart
-            // self.service.kubelet_gone.notified().await;
-
-            // handle.abort();
+        Self {
+            endpoint,
+            resource_name,
+            service,
         }
     }
 
-    async fn spawn_server(
-        &self,
-        socket_name: &str,
-    ) -> io::Result<JoinHandle<Result<(), transport::Error>>> {
-        use tokio::net::UnixListener;
-        use tokio_stream::wrappers::UnixListenerStream;
+    pub async fn run(&self) -> io::Result<()> {
+        let handle = self.spawn_server()?;
+        // Server is running, now register with kubelet.
+        match self.register().await {
+            Ok(()) => {
+                println!("Registered with kubelet, waiting for server to exit...");
+            }
+            Err(err) => {
+                eprintln!("Failed to register with kubelet: {err}");
+                // If registration fails, we should stop the server and retry.
+                handle.abort();
+            }
+        }
+        handle.await?.unwrap_or_else(|err| eprintln!("{err}"));
+        Ok(())
+    }
 
-        let endpoint = String::from(v1beta1::DEVICE_PLUGIN_PATH) + socket_name;
-        ensure_no_file(&endpoint)?;
-        let uds = UnixListener::bind(endpoint).map(UnixListenerStream::new)?;
-
+    fn spawn_server(&self) -> io::Result<JoinHandle<Result<(), transport::Error>>> {
+        let incoming: UnixListenerStream = self.setup_listener()?;
         let svc = self.service();
         let router = transport::Server::builder().add_service(svc);
-        let handle = tokio::spawn(router.serve_with_incoming(uds));
-
+        let handle = tokio::spawn(router.serve_with_incoming(incoming));
         Ok(handle)
     }
 
-    pub async fn register(
-        endpoint: &str,
-        resource_name: &str,
-    ) -> tonic::Result<tonic::Response<v1beta1::Empty>> {
-        let version = v1beta1::VERSION.to_string();
-        let endpoint = endpoint.to_string();
-        let resource_name = resource_name.to_string();
-
-        let request = v1beta1::RegisterRequest {
-            version,
-            endpoint,
-            resource_name,
-            options: None,
-        };
-
-        Self::registration_client().await?.register(request).await
-    }
-
-    async fn registration_client() -> tonic::Result<v1beta1::RegistrationClient<Channel>> {
-        v1beta1::RegistrationClient::connect(Self::kubelet_socket_path())
+    pub async fn register(&self) -> tonic::Result<()> {
+        RegistrationClient::new(Self::kubelet_socket_path())
+            .await?
+            .register(&self.endpoint, &self.resource_name)
             .await
-            .map_err(|err| tonic::Status::from_error(Box::new(err)))
     }
 
     fn kubelet_socket_path() -> String {
         String::from(v1beta1::DEVICE_PLUGIN_PATH) + v1beta1::KUBELET_SOCKET
+    }
+
+    fn setup_listener(&self) -> io::Result<UnixListenerStream> {
+        if fs::exists(&self.endpoint)? {
+            fs::remove_file(&self.endpoint)?;
+        }
+        UnixListener::bind(&self.endpoint).map(UnixListenerStream::new)
     }
 
     fn service(&self) -> v1beta1::DevicePluginServer<DevicePluginService> {
@@ -174,8 +154,7 @@ impl DevicePluginService {
 
 #[tonic::async_trait]
 impl v1beta1::DevicePlugin for DevicePluginService {
-    type ListAndWatchStream =
-        tokio_stream::wrappers::ReceiverStream<tonic::Result<v1beta1::ListAndWatchResponse>>;
+    type ListAndWatchStream = ReceiverStream<tonic::Result<v1beta1::ListAndWatchResponse>>;
 
     async fn get_device_plugin_options(
         &self,
@@ -258,11 +237,12 @@ impl v1beta1::DevicePlugin for DevicePluginService {
     }
 }
 
-fn ensure_no_file(path: &str) -> io::Result<()> {
-    if fs::exists(path)? {
-        fs::remove_file(path)?;
-    }
-    Ok(())
+fn sanitize_socket_name(name: &str) -> String {
+    name.replace(invalid_char, "_")
+}
+
+fn invalid_char(c: char) -> bool {
+    !(c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 #[cfg(test)]
