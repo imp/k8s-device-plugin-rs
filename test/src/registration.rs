@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::Ordering;
 
 use k8s_device_plugin_proto::v1beta1;
 use tempfile::TempDir;
@@ -12,7 +14,10 @@ use tonic::transport;
 #[derive(Debug, Default)]
 pub struct FakeRegistration {
     pub requests: Arc<Mutex<Vec<v1beta1::RegisterRequest>>>,
+    /// Always-fail response: returns this status for every request.
     pub failure: Option<(tonic::Code, String)>,
+    /// Countdown: fail this many times with `Unavailable`, then succeed.
+    pub fail_count: Arc<AtomicU32>,
 }
 
 #[tonic::async_trait]
@@ -23,6 +28,11 @@ impl v1beta1::Registration for FakeRegistration {
     ) -> tonic::Result<tonic::Response<v1beta1::Empty>> {
         if let Some((code, message)) = &self.failure {
             return Err(tonic::Status::new(*code, message.clone()));
+        }
+        let remaining = self.fail_count.load(Ordering::SeqCst);
+        if remaining > 0 {
+            self.fail_count.fetch_sub(1, Ordering::SeqCst);
+            return Err(tonic::Status::unavailable("transient registration failure"));
         }
         self.requests.lock().await.push(request.into_inner());
         Ok(tonic::Response::new(v1beta1::Empty {}))
@@ -56,13 +66,26 @@ impl MockRegistrationServer {
 pub fn start_mock_registration_server(
     failure: Option<(tonic::Code, &str)>,
 ) -> MockRegistrationServer {
+    let fake = FakeRegistration {
+        failure: failure.map(|(code, message)| (code, message.to_string())),
+        ..Default::default()
+    };
+    start_server(fake)
+}
+
+/// Start a mock registration server that rejects the first `fail_count` requests
+/// with `Unavailable`, then accepts all subsequent ones.
+pub fn start_mock_registration_server_with_failures(fail_count: u32) -> MockRegistrationServer {
+    let fake = FakeRegistration {
+        fail_count: Arc::new(AtomicU32::new(fail_count)),
+        ..Default::default()
+    };
+    start_server(fake)
+}
+
+fn start_server(fake: FakeRegistration) -> MockRegistrationServer {
     let socket_dir = TempDir::new().expect("create temp dir for registration socket");
     let socket_path = socket_dir.path().join(v1beta1::KUBELET_SOCKET);
-
-    let fake = FakeRegistration {
-        requests: Arc::new(Mutex::new(vec![])),
-        failure: failure.map(|(code, message)| (code, message.to_string())),
-    };
     let requests = Arc::clone(&fake.requests);
 
     let listener = UnixListener::bind(&socket_path).expect("bind unix socket");

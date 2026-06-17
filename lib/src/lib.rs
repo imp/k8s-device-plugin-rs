@@ -5,6 +5,7 @@ use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::net::UnixListener;
 use tokio::task::JoinHandle;
@@ -90,20 +91,48 @@ impl DevicePlugin {
     }
 
     pub async fn run(&self) -> io::Result<()> {
-        let handle = self.spawn_server()?;
-        // Server is running, now register with kubelet.
-        match self.register().await {
-            Ok(()) => {
-                println!("Registered with kubelet, waiting for server to exit...");
-            }
-            Err(err) => {
-                eprintln!("Failed to register with kubelet: {err}");
-                // If registration fails, we should stop the server and retry.
-                handle.abort();
+        let mut server_handle = self.spawn_server()?;
+        loop {
+            // Subscribe before registering so a fast kubelet disconnect is never missed.
+            let kubelet_gone = self.service.kubelet_gone.notified();
+            self.register_with_retry().await?;
+            tokio::select! {
+                result = &mut server_handle => {
+                    return result
+                        .map_err(io::Error::other)?
+                        .map_err(io::Error::other);
+                }
+                _ = kubelet_gone => {
+                    // Kubelet disconnected; loop back to re-register.
+                }
             }
         }
-        handle.await?.unwrap_or_else(|err| eprintln!("{err}"));
-        Ok(())
+    }
+
+    async fn register_with_retry(&self) -> io::Result<()> {
+        self.try_register(Self::kubelet_socket_path(), 10, Duration::from_secs(1))
+            .await
+    }
+
+    async fn try_register(
+        &self,
+        kubelet_socket: String,
+        max_attempts: u32,
+        initial_delay: Duration,
+    ) -> io::Result<()> {
+        let mut delay = initial_delay;
+        for attempt in 1..=max_attempts {
+            match self.register_at(kubelet_socket.clone()).await {
+                Ok(()) => return Ok(()),
+                Err(err) if attempt < max_attempts => {
+                    eprintln!("Registration attempt {attempt}/{max_attempts} failed: {err}");
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(Duration::from_secs(30));
+                }
+                Err(err) => return Err(io::Error::other(err)),
+            }
+        }
+        unreachable!()
     }
 
     fn spawn_server(&self) -> io::Result<JoinHandle<Result<(), transport::Error>>> {
@@ -115,7 +144,11 @@ impl DevicePlugin {
     }
 
     pub async fn register(&self) -> tonic::Result<()> {
-        RegistrationClient::new(Self::kubelet_socket_path())
+        self.register_at(Self::kubelet_socket_path()).await
+    }
+
+    async fn register_at(&self, kubelet_socket: String) -> tonic::Result<()> {
+        RegistrationClient::new(kubelet_socket)
             .await?
             .register(self.registration_endpoint(), &self.resource_name)
             .await
@@ -368,5 +401,57 @@ mod tests {
 
         let status = service.allocate(request).await.unwrap_err();
         assert_eq!(status.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn try_register_succeeds_on_first_attempt() {
+        use k8s_device_plugin_test::registration::start_mock_registration_server;
+
+        let server = start_mock_registration_server(None);
+        let plugin = DevicePlugin::new("example.com/device", make_service());
+
+        plugin
+            .try_register(server.socket_path(), 3, Duration::from_millis(1))
+            .await
+            .expect("registration should succeed");
+
+        let requests = server.collected_requests().await;
+        assert_eq!(requests.len(), 1);
+        server.shutdown();
+    }
+
+    #[tokio::test]
+    async fn try_register_gives_up_after_max_attempts() {
+        use k8s_device_plugin_test::registration::start_mock_registration_server;
+
+        let server =
+            start_mock_registration_server(Some((tonic::Code::Unavailable, "kubelet down")));
+        let plugin = DevicePlugin::new("example.com/device", make_service());
+
+        let err = plugin
+            .try_register(server.socket_path(), 3, Duration::from_millis(1))
+            .await
+            .expect_err("should give up after max attempts");
+
+        assert!(err.to_string().contains("kubelet down"));
+        server.shutdown();
+    }
+
+    #[tokio::test]
+    async fn try_register_retries_until_success() {
+        use k8s_device_plugin_test::registration::start_mock_registration_server_with_failures;
+
+        let server = start_mock_registration_server_with_failures(2);
+        let plugin = DevicePlugin::new("example.com/device", make_service());
+
+        plugin
+            .try_register(server.socket_path(), 3, Duration::from_millis(1))
+            .await
+            .expect("should succeed after 2 failures");
+
+        // Only the successful attempt is recorded (failures don't push to requests).
+        let requests = server.collected_requests().await;
+        assert_eq!(requests.len(), 1);
+        server.shutdown();
     }
 }
