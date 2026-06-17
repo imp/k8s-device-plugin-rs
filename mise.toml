@@ -26,4 +26,4 @@ cargo clippy
 
 [tasks.deps]
 description = "Update dependencies"
-run = ["cargo update", 'git commit -m "Update deps" Cargo.lock']
+run = ["cargo update", 'jj commit -m "Update deps" Cargo.lock']
