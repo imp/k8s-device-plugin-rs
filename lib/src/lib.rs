@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::io;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -116,8 +117,15 @@ impl DevicePlugin {
     pub async fn register(&self) -> tonic::Result<()> {
         RegistrationClient::new(Self::kubelet_socket_path())
             .await?
-            .register(&self.endpoint, &self.resource_name)
+            .register(self.registration_endpoint(), &self.resource_name)
             .await
+    }
+
+    fn registration_endpoint(&self) -> &str {
+        Path::new(&self.endpoint)
+            .file_name()
+            .and_then(|file_name| file_name.to_str())
+            .unwrap_or(&self.endpoint)
     }
 
     fn kubelet_socket_path() -> String {
@@ -254,6 +262,17 @@ mod tests {
     fn kubelet_socket_path() {
         let endpoint = DevicePlugin::kubelet_socket_path();
         assert_eq!(endpoint, "/var/lib/kubelet/device-plugins/kubelet.sock");
+    }
+
+    #[test]
+    fn register_uses_socket_filename_as_endpoint() {
+        let plugin = DevicePlugin::new("example.com/device", make_service());
+
+        assert_eq!(
+            plugin.endpoint,
+            "/var/lib/kubelet/device-plugins/example_com_device"
+        );
+        assert_eq!(plugin.registration_endpoint(), "example_com_device");
     }
 
     #[test]
