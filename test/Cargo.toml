@@ -1,0 +1,20 @@
+[package]
+name = "k8s-device-plugin-test"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+
+[dependencies]
+hyper-util.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tokio-stream.workspace = true
+tonic.workspace = true
+tower.workspace = true
+
+k8s-device-plugin-proto.workspace = true
+
+
+[lints]
+workspace = true

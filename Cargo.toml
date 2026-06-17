@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["core", "lib", "proto"]
+members = ["core", "lib", "proto", "test"]
 
 
 [workspace.package]
@@ -10,16 +10,20 @@ repository = "https://github.com/imp/k8s-device-plugin-rs"
 
 
 [workspace.dependencies]
+hyper-util = "0.1"
 prost = "0.14"
+tempfile = "3.27"
 tokio = { version = "1.52", features = ["macros"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tonic = "0.14"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
+tower = "0.5"
 
 k8s-device-plugin-core = { path = "core" }
 k8s-device-plugin-lib = { path = "lib" }
 k8s-device-plugin-proto = { path = "proto" }
+k8s-device-plugin-test = { path = "test" }
 
 
 [workspace.lints.clippy]
