@@ -13,10 +13,13 @@ pub mod v1beta1 {
 
     // const KUBELET_PRE_START_CONTAINER_RPC_TIMEOUT_IN_SECS: u64 = 30;
 
+    pub use device_plugin_client::DevicePluginClient;
     pub use device_plugin_server::DevicePlugin;
     pub use device_plugin_server::DevicePluginServer;
     pub use device_plugin_server::SERVICE_NAME;
     pub use registration_client::RegistrationClient;
+    pub use registration_server::Registration;
+    pub use registration_server::RegistrationServer;
 
     tonic::include_proto!("v1beta1");
 }
