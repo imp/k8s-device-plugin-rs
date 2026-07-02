@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::fmt;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -15,10 +15,15 @@ use tonic::transport::Channel;
 use k8s_device_plugin_proto as proto;
 pub use proto::v1beta1;
 
+pub use k8s_device_plugin_core::AllocationError;
+pub use k8s_device_plugin_core::ContainerAllocation;
 pub use k8s_device_plugin_core::Device;
+pub use k8s_device_plugin_core::DeviceAllocator;
+pub use k8s_device_plugin_core::DeviceDiscovery;
 pub use k8s_device_plugin_core::DevicePath;
 pub use k8s_device_plugin_core::DevicePermissions;
 pub use k8s_device_plugin_core::Health;
+pub use k8s_device_plugin_core::K8sDevicePlugin;
 pub use registration::RegistrationClient;
 
 mod registration;
@@ -31,16 +36,12 @@ fn device_to_proto(device: &Device) -> v1beta1::Device {
     }
 }
 
-fn device_to_device_specs(device: &Device) -> Vec<v1beta1::DeviceSpec> {
-    device
-        .paths
-        .iter()
-        .map(|p| v1beta1::DeviceSpec {
-            host_path: p.host_path.to_string_lossy().into_owned(),
-            container_path: p.container_path.to_string_lossy().into_owned(),
-            permissions: p.permissions.to_string(),
-        })
-        .collect()
+fn device_path_to_spec(path: &DevicePath) -> v1beta1::DeviceSpec {
+    v1beta1::DeviceSpec {
+        host_path: path.host_path.to_string_lossy().into_owned(),
+        container_path: path.container_path.to_string_lossy().into_owned(),
+        permissions: path.permissions.to_string(),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -169,18 +170,24 @@ impl DevicePlugin {
     }
 }
 
-#[derive(Debug)]
 pub struct DevicePluginService {
-    devices: HashMap<String, Device>,
+    plugin: Box<dyn K8sDevicePlugin>,
     kubelet_gone: Arc<tokio::sync::Notify>,
 }
 
 impl DevicePluginService {
-    pub fn new(devices: HashMap<String, Device>) -> Self {
+    pub fn new<P: K8sDevicePlugin + 'static>(plugin: P) -> Self {
         Self {
-            devices,
+            plugin: Box::new(plugin),
             kubelet_gone: Arc::new(tokio::sync::Notify::new()),
         }
+    }
+}
+
+impl fmt::Debug for DevicePluginService {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DevicePluginService")
+            .finish_non_exhaustive()
     }
 }
 
@@ -201,7 +208,13 @@ impl v1beta1::DevicePlugin for DevicePluginService {
     ) -> tonic::Result<tonic::Response<Self::ListAndWatchStream>> {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
 
-        let devices: Vec<_> = self.devices.values().map(device_to_proto).collect();
+        let devices: Vec<_> = self
+            .plugin
+            .discover()
+            .await
+            .iter()
+            .map(device_to_proto)
+            .collect();
         let kubelet_gone = Arc::clone(&self.kubelet_gone);
         tokio::spawn(async move {
             let response = v1beta1::ListAndWatchResponse { devices };
@@ -226,33 +239,23 @@ impl v1beta1::DevicePlugin for DevicePluginService {
         &self,
         request: tonic::Request<v1beta1::AllocateRequest>,
     ) -> tonic::Result<tonic::Response<v1beta1::AllocateResponse>> {
-        let container_responses = request
-            .into_inner()
-            .container_requests
-            .into_iter()
-            .map(|container_request| {
-                let devices = container_request
-                    .devices_ids
-                    .iter()
-                    .map(|id| {
-                        self.devices
-                            .get(id)
-                            .ok_or_else(|| {
-                                tonic::Status::not_found(format!("device {id} not found"))
-                            })
-                            .map(device_to_device_specs)
-                    })
-                    .collect::<tonic::Result<Vec<_>>>()?
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<_>>();
-
-                Ok(v1beta1::ContainerAllocateResponse {
-                    devices,
-                    ..Default::default()
-                })
-            })
-            .collect::<tonic::Result<Vec<_>>>()?;
+        let mut container_responses = Vec::new();
+        for container_request in request.into_inner().container_requests {
+            let allocation = self
+                .plugin
+                .allocate(&container_request.devices_ids)
+                .await
+                .map_err(|err| tonic::Status::not_found(err.to_string()))?;
+            let devices = allocation
+                .device_paths
+                .iter()
+                .map(device_path_to_spec)
+                .collect();
+            container_responses.push(v1beta1::ContainerAllocateResponse {
+                devices,
+                ..Default::default()
+            });
+        }
 
         Ok(tonic::Response::new(v1beta1::AllocateResponse {
             container_responses,
@@ -314,21 +317,44 @@ mod tests {
     }
 
     #[test]
-    fn converts_device_to_device_specs() {
-        let device = Device {
-            id: "dev-0".to_string(),
-            health: Health::Healthy,
-            paths: vec![DevicePath {
-                host_path: PathBuf::from("/dev/mydev0"),
-                container_path: PathBuf::from("/dev/mydev0"),
-                permissions: DevicePermissions::rdwr(),
-            }],
+    fn converts_device_path_to_spec() {
+        let path = DevicePath {
+            host_path: PathBuf::from("/dev/mydev0"),
+            container_path: PathBuf::from("/dev/mydev0"),
+            permissions: DevicePermissions::rdwr(),
         };
-        let specs = device_to_device_specs(&device);
-        assert_eq!(specs.len(), 1);
-        assert_eq!(specs[0].host_path, "/dev/mydev0");
-        assert_eq!(specs[0].container_path, "/dev/mydev0");
-        assert_eq!(specs[0].permissions, "rw");
+        let spec = device_path_to_spec(&path);
+        assert_eq!(spec.host_path, "/dev/mydev0");
+        assert_eq!(spec.container_path, "/dev/mydev0");
+        assert_eq!(spec.permissions, "rw");
+    }
+
+    struct StaticDevicePlugin(Vec<Device>);
+
+    #[tonic::async_trait]
+    impl DeviceDiscovery for StaticDevicePlugin {
+        async fn discover(&self) -> Vec<Device> {
+            self.0.clone()
+        }
+    }
+
+    #[tonic::async_trait]
+    impl DeviceAllocator for StaticDevicePlugin {
+        async fn allocate(
+            &self,
+            device_ids: &[String],
+        ) -> Result<ContainerAllocation, AllocationError> {
+            let mut device_paths = Vec::new();
+            for id in device_ids {
+                let device = self
+                    .0
+                    .iter()
+                    .find(|d| &d.id == id)
+                    .ok_or_else(|| AllocationError::DeviceNotFound(id.clone()))?;
+                device_paths.extend(device.paths.iter().cloned());
+            }
+            Ok(ContainerAllocation { device_paths })
+        }
     }
 
     fn make_service() -> DevicePluginService {
@@ -341,7 +367,7 @@ mod tests {
                 permissions: DevicePermissions::rdwr(),
             }],
         };
-        DevicePluginService::new(HashMap::from([("dev-0".to_string(), device)]))
+        DevicePluginService::new(StaticDevicePlugin(vec![device]))
     }
 
     #[tokio::test]
