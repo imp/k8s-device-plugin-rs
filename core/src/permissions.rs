@@ -1,6 +1,6 @@
-use super::*;
+use std::fmt;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct DevicePermissions {
     pub read: bool,
     pub write: bool,

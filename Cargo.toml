@@ -10,6 +10,7 @@ repository = "https://github.com/imp/k8s-device-plugin-rs"
 
 
 [workspace.dependencies]
+async-trait = "0.1"
 hyper-util = "0.1"
 prost = "0.14"
 tempfile = "3.27"

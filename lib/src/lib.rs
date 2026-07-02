@@ -1,9 +1,7 @@
 use std::collections::HashMap;
-use std::fmt;
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,57 +15,32 @@ use tonic::transport::Channel;
 use k8s_device_plugin_proto as proto;
 pub use proto::v1beta1;
 
-pub use health::Health;
-pub use permissions::DevicePermissions;
+pub use k8s_device_plugin_core::Device;
+pub use k8s_device_plugin_core::DevicePath;
+pub use k8s_device_plugin_core::DevicePermissions;
+pub use k8s_device_plugin_core::Health;
 pub use registration::RegistrationClient;
 
-mod health;
-mod permissions;
 mod registration;
 
-#[derive(Debug, Clone)]
-pub struct DevicePath {
-    pub host_path: PathBuf,
-    pub container_path: PathBuf,
-    pub permissions: DevicePermissions,
-}
-
-impl From<DevicePath> for v1beta1::DeviceSpec {
-    fn from(path: DevicePath) -> Self {
-        Self {
-            host_path: path.host_path.to_string_lossy().into_owned(),
-            container_path: path.container_path.to_string_lossy().into_owned(),
-            permissions: path.permissions.to_string(),
-        }
+fn device_to_proto(device: &Device) -> v1beta1::Device {
+    v1beta1::Device {
+        id: device.id.clone(),
+        health: device.health.to_string(),
+        topology: None,
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Device {
-    pub id: String,
-    pub health: Health,
-    pub paths: Vec<DevicePath>,
-}
-
-impl Device {
-    fn to_proto(&self) -> v1beta1::Device {
-        v1beta1::Device {
-            id: self.id.clone(),
-            health: self.health.to_string(),
-            topology: None,
-        }
-    }
-
-    fn to_device_specs(&self) -> Vec<v1beta1::DeviceSpec> {
-        self.paths
-            .iter()
-            .map(|p| v1beta1::DeviceSpec {
-                host_path: p.host_path.to_string_lossy().into_owned(),
-                container_path: p.container_path.to_string_lossy().into_owned(),
-                permissions: p.permissions.to_string(),
-            })
-            .collect()
-    }
+fn device_to_device_specs(device: &Device) -> Vec<v1beta1::DeviceSpec> {
+    device
+        .paths
+        .iter()
+        .map(|p| v1beta1::DeviceSpec {
+            host_path: p.host_path.to_string_lossy().into_owned(),
+            container_path: p.container_path.to_string_lossy().into_owned(),
+            permissions: p.permissions.to_string(),
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug)]
@@ -228,7 +201,7 @@ impl v1beta1::DevicePlugin for DevicePluginService {
     ) -> tonic::Result<tonic::Response<Self::ListAndWatchStream>> {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
 
-        let devices: Vec<_> = self.devices.values().map(Device::to_proto).collect();
+        let devices: Vec<_> = self.devices.values().map(device_to_proto).collect();
         let kubelet_gone = Arc::clone(&self.kubelet_gone);
         tokio::spawn(async move {
             let response = v1beta1::ListAndWatchResponse { devices };
@@ -267,7 +240,7 @@ impl v1beta1::DevicePlugin for DevicePluginService {
                             .ok_or_else(|| {
                                 tonic::Status::not_found(format!("device {id} not found"))
                             })
-                            .map(Device::to_device_specs)
+                            .map(device_to_device_specs)
                     })
                     .collect::<tonic::Result<Vec<_>>>()?
                     .into_iter()
@@ -306,6 +279,8 @@ fn invalid_char(c: char) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
     use tokio_stream::StreamExt;
 
@@ -327,19 +302,19 @@ mod tests {
     }
 
     #[test]
-    fn device_to_proto() {
+    fn converts_device_to_proto() {
         let device = Device {
             id: "dev-0".to_string(),
             health: Health::Healthy,
             paths: vec![],
         };
-        let proto = device.to_proto();
+        let proto = device_to_proto(&device);
         assert_eq!(proto.id, "dev-0");
         assert_eq!(proto.health, v1beta1::HEALTHY);
     }
 
     #[test]
-    fn device_to_device_specs() {
+    fn converts_device_to_device_specs() {
         let device = Device {
             id: "dev-0".to_string(),
             health: Health::Healthy,
@@ -349,7 +324,7 @@ mod tests {
                 permissions: DevicePermissions::rdwr(),
             }],
         };
-        let specs = device.to_device_specs();
+        let specs = device_to_device_specs(&device);
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].host_path, "/dev/mydev0");
         assert_eq!(specs[0].container_path, "/dev/mydev0");

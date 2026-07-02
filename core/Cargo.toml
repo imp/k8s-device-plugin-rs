@@ -6,6 +6,11 @@ repository.workspace = true
 
 
 [dependencies]
+async-trait.workspace = true
+
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt"] }
 
 
 [lints]

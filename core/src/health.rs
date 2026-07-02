@@ -1,6 +1,6 @@
-use super::*;
+use std::fmt;
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Copy, Debug)]
 pub enum Health {
     Healthy,
     Unhealthy,
@@ -9,8 +9,8 @@ pub enum Health {
 impl Health {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Healthy => v1beta1::HEALTHY,
-            Self::Unhealthy => v1beta1::UNHEALTHY,
+            Self::Healthy => "Healthy",
+            Self::Unhealthy => "Unhealthy",
         }
     }
 }
@@ -27,13 +27,13 @@ mod tests {
 
     #[test]
     fn health_as_str() {
-        assert_eq!(Health::Healthy.as_str(), v1beta1::HEALTHY);
-        assert_eq!(Health::Unhealthy.as_str(), v1beta1::UNHEALTHY);
+        assert_eq!(Health::Healthy.as_str(), "Healthy");
+        assert_eq!(Health::Unhealthy.as_str(), "Unhealthy");
     }
 
     #[test]
     fn health_display() {
-        assert_eq!(Health::Healthy.to_string(), v1beta1::HEALTHY);
-        assert_eq!(Health::Unhealthy.to_string(), v1beta1::UNHEALTHY);
+        assert_eq!(Health::Healthy.to_string(), "Healthy");
+        assert_eq!(Health::Unhealthy.to_string(), "Unhealthy");
     }
 }
