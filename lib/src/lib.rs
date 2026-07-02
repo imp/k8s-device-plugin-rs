@@ -75,6 +75,7 @@ pub struct DevicePlugin {
     endpoint: String,
     resource_name: String,
     service: Arc<DevicePluginService>,
+    kubelet_socket: String,
 }
 
 impl DevicePlugin {
@@ -83,10 +84,27 @@ impl DevicePlugin {
         let resource_name = resource_name.to_string();
         let endpoint = String::from(v1beta1::DEVICE_PLUGIN_PATH) + &socket_name;
         let service = Arc::new(service);
+        let kubelet_socket = Self::kubelet_socket_path();
         Self {
             endpoint,
             resource_name,
             service,
+            kubelet_socket,
+        }
+    }
+
+    #[cfg(test)]
+    fn for_test(
+        resource_name: &str,
+        service: DevicePluginService,
+        endpoint: String,
+        kubelet_socket: String,
+    ) -> Self {
+        Self {
+            endpoint,
+            resource_name: resource_name.to_string(),
+            service: Arc::new(service),
+            kubelet_socket,
         }
     }
 
@@ -110,7 +128,7 @@ impl DevicePlugin {
     }
 
     async fn register_with_retry(&self) -> io::Result<()> {
-        self.try_register(Self::kubelet_socket_path(), 10, Duration::from_secs(1))
+        self.try_register(self.kubelet_socket.clone(), 10, Duration::from_secs(1))
             .await
     }
 
@@ -144,7 +162,7 @@ impl DevicePlugin {
     }
 
     pub async fn register(&self) -> tonic::Result<()> {
-        self.register_at(Self::kubelet_socket_path()).await
+        self.register_at(self.kubelet_socket.clone()).await
     }
 
     async fn register_at(&self, kubelet_socket: String) -> tonic::Result<()> {
@@ -453,5 +471,65 @@ mod tests {
         let requests = server.collected_requests().await;
         assert_eq!(requests.len(), 1);
         server.shutdown();
+    }
+
+    #[tokio::test]
+    async fn run_reregisters_after_kubelet_disconnects() {
+        use k8s_device_plugin_test::device_plugin::MockDevicePluginClient;
+        use k8s_device_plugin_test::registration::start_mock_registration_server;
+        use tempfile::TempDir;
+
+        let registration_server = start_mock_registration_server(None);
+        let plugin_dir = TempDir::new().expect("create temp dir for plugin socket");
+        let endpoint = plugin_dir
+            .path()
+            .join("plugin.sock")
+            .to_string_lossy()
+            .into_owned();
+
+        let plugin = DevicePlugin::for_test(
+            "example.com/device",
+            make_service(),
+            endpoint.clone(),
+            registration_server.socket_path(),
+        );
+
+        let run_handle = tokio::spawn(async move { plugin.run().await });
+
+        wait_for_request_count(&registration_server, 1).await;
+
+        // Connect as the kubelet and read the initial device list. The
+        // client-side stream is dropped when this call returns, which the
+        // plugin detects as the kubelet going away.
+        let mut client = MockDevicePluginClient::connect(&endpoint)
+            .await
+            .expect("connect to plugin socket");
+        client
+            .list_and_watch_once()
+            .await
+            .expect("initial device list");
+
+        wait_for_request_count(&registration_server, 2).await;
+
+        let requests = registration_server.collected_requests().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].resource_name, "example.com/device");
+        assert_eq!(requests[1].endpoint, "plugin.sock");
+
+        run_handle.abort();
+        registration_server.shutdown();
+    }
+
+    async fn wait_for_request_count(
+        server: &k8s_device_plugin_test::registration::MockRegistrationServer,
+        count: usize,
+    ) {
+        for _ in 0..200 {
+            if server.collected_requests().await.len() >= count {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("timed out waiting for {count} registration request(s)");
     }
 }
