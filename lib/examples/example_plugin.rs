@@ -91,7 +91,7 @@ impl K8sDevicePlugin for ExampleWidgetPlugin {
     }
 
     async fn pre_start_container(&self, device_ids: &[String]) -> Result<(), AllocationError> {
-        eprintln!("pre-start hook: resetting devices {device_ids:?}");
+        tracing::info!(?device_ids, "pre-start hook: resetting devices");
         Ok(())
     }
 
@@ -124,9 +124,16 @@ impl K8sDevicePlugin for ExampleWidgetPlugin {
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
     let service = DevicePluginService::new(ExampleWidgetPlugin::new());
     let plugin = DevicePlugin::new(RESOURCE_NAME, service);
 
-    eprintln!("starting example device plugin for resource {RESOURCE_NAME}");
+    tracing::info!(
+        resource_name = RESOURCE_NAME,
+        "starting example device plugin"
+    );
     plugin.run().await
 }

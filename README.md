@@ -95,6 +95,16 @@ impl K8sDevicePlugin for MyBackend {
 
 Leave both hooks at their defaults (`false` / no-op / unavailable) if your device doesn't need a pre-start step or non-arbitrary allocation choice.
 
+## Observability
+
+The framework emits structured [`tracing`](https://docs.rs/tracing) events and spans — never raw `println!`/`eprintln!` — covering the registration lifecycle and every RPC handler. It doesn't install a subscriber itself (see `obs-library-facade`); your binary chooses one. The example plugin installs a plain formatting subscriber filtered by `RUST_LOG`:
+
+```bash
+RUST_LOG=info cargo run --example example_plugin
+```
+
+Because RPC handlers are wrapped in `#[tracing::instrument]` spans, any subscriber `Layer` you attach (a Prometheus exporter, `tracing-opentelemetry`, etc.) gets call counts and latencies for `Allocate`, `ListAndWatch`, `PreStartContainer`, and `GetPreferredAllocation` for free, without the framework needing its own metrics API.
+
 ## Local validation
 
 This repo uses [`mise`](https://mise.jdx.dev/) to mirror the CI checklist locally:

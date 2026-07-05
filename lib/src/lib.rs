@@ -96,17 +96,20 @@ impl DevicePlugin {
         }
     }
 
+    #[tracing::instrument(skip(self), fields(resource_name = %self.resource_name))]
     pub async fn run(&self) -> io::Result<()> {
         let mut server_handle = self.spawn_server()?;
         loop {
             // Subscribe before registering so a fast kubelet disconnect is never missed.
             let kubelet_gone = self.service.kubelet_gone.notified();
             if let Err(err) = self.register_with_retry().await {
+                tracing::error!(%err, "registration permanently failed; shutting down");
                 // Registration is permanently exhausted: abort the spawned server task
                 // so it doesn't keep serving RPCs against a listener nobody can reach.
                 server_handle.abort();
                 return Err(err);
             }
+            tracing::info!("registered with kubelet");
             tokio::select! {
                 result = &mut server_handle => {
                     return result
@@ -114,7 +117,7 @@ impl DevicePlugin {
                         .map_err(io::Error::other);
                 }
                 _ = kubelet_gone => {
-                    // Kubelet disconnected; loop back to re-register.
+                    tracing::warn!("kubelet disconnected; re-registering");
                 }
             }
         }
@@ -125,6 +128,7 @@ impl DevicePlugin {
             .await
     }
 
+    #[tracing::instrument(skip(self, kubelet_socket), fields(resource_name = %self.resource_name))]
     async fn try_register(
         &self,
         kubelet_socket: String,
@@ -139,7 +143,7 @@ impl DevicePlugin {
             match self.register_at(kubelet_socket.clone()).await {
                 Ok(()) => return Ok(()),
                 Err(err) if attempt < max_attempts => {
-                    eprintln!("Registration attempt {attempt}/{max_attempts} failed: {err}");
+                    tracing::warn!(attempt, max_attempts, %err, "registration attempt failed; retrying");
                     tokio::time::sleep(delay).await;
                     delay = (delay * 2).min(Duration::from_secs(30));
                 }
@@ -241,6 +245,7 @@ impl v1beta1::DevicePlugin for DevicePluginService {
         }))
     }
 
+    #[tracing::instrument(skip(self, _request))]
     async fn list_and_watch(
         &self,
         _request: tonic::Request<v1beta1::Empty>,
@@ -262,6 +267,7 @@ impl v1beta1::DevicePlugin for DevicePluginService {
                     () = tokio::time::sleep(poll_interval) => {
                         let devices = plugin.discover().await;
                         if !devices_equal_ignoring_order(&devices, &last_devices) {
+                            tracing::debug!(device_count = devices.len(), "device state changed; pushing update");
                             let response = v1beta1::ListAndWatchResponse {
                                 devices: devices.iter().map(device_to_proto).collect(),
                             };
@@ -280,6 +286,7 @@ impl v1beta1::DevicePlugin for DevicePluginService {
         Ok(tonic::Response::new(Self::ListAndWatchStream::new(rx)))
     }
 
+    #[tracing::instrument(skip(self, request))]
     async fn get_preferred_allocation(
         &self,
         request: tonic::Request<v1beta1::PreferredAllocationRequest>,
@@ -297,6 +304,7 @@ impl v1beta1::DevicePlugin for DevicePluginService {
                     size,
                 )
                 .await
+                .inspect_err(|err| tracing::warn!(%err, "preferred_allocation hook failed"))
                 .map_err(|err| tonic::Status::failed_precondition(err.to_string()))?;
             container_responses.push(v1beta1::ContainerPreferredAllocationResponse {
                 device_i_ds: device_ids,
@@ -308,6 +316,7 @@ impl v1beta1::DevicePlugin for DevicePluginService {
         }))
     }
 
+    #[tracing::instrument(skip(self, request))]
     async fn allocate(
         &self,
         request: tonic::Request<v1beta1::AllocateRequest>,
@@ -318,6 +327,7 @@ impl v1beta1::DevicePlugin for DevicePluginService {
                 .plugin
                 .allocate(&container_request.devices_ids)
                 .await
+                .inspect_err(|err| tracing::warn!(%err, "allocate failed"))
                 .map_err(|err| tonic::Status::not_found(err.to_string()))?;
             let devices = allocation
                 .device_paths
@@ -335,6 +345,7 @@ impl v1beta1::DevicePlugin for DevicePluginService {
         }))
     }
 
+    #[tracing::instrument(skip(self, request))]
     async fn pre_start_container(
         &self,
         request: tonic::Request<v1beta1::PreStartContainerRequest>,
@@ -343,6 +354,7 @@ impl v1beta1::DevicePlugin for DevicePluginService {
         self.plugin
             .pre_start_container(&device_ids)
             .await
+            .inspect_err(|err| tracing::warn!(%err, "pre_start_container hook failed"))
             .map_err(|err| tonic::Status::failed_precondition(err.to_string()))?;
         Ok(tonic::Response::new(v1beta1::PreStartContainerResponse {}))
     }

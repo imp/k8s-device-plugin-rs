@@ -21,6 +21,8 @@ tonic = "0.14"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
 tower = "0.5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 k8s-device-plugin-core = { path = "core" }
 k8s-device-plugin-lib = { path = "lib" }
