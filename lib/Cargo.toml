@@ -18,6 +18,7 @@ k8s-device-plugin-proto.workspace = true
 
 
 [dev-dependencies]
+k8s-device-plugin-core = { workspace = true, features = ["test-util"] }
 k8s-device-plugin-test.workspace = true
 prometheus_exporter.workspace = true
 tempfile.workspace = true

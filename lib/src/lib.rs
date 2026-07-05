@@ -350,12 +350,24 @@ impl v1beta1::DevicePlugin for DevicePluginService {
         &self,
         request: tonic::Request<v1beta1::AllocateRequest>,
     ) -> tonic::Result<tonic::Response<v1beta1::AllocateResponse>> {
-        let mut container_responses = Vec::new();
-        for container_request in request.into_inner().container_requests {
-            let allocation = self
-                .plugin
-                .allocate(&container_request.devices_ids)
+        // Each container's allocation is independent, so run them concurrently
+        // instead of one-at-a-time -- spawn all tasks up front, then await in
+        // order so container_responses lines up with the request.
+        let tasks = request
+            .into_inner()
+            .container_requests
+            .into_iter()
+            .map(|container_request| {
+                let plugin = Arc::clone(&self.plugin);
+                tokio::spawn(async move { plugin.allocate(&container_request.devices_ids).await })
+            })
+            .collect::<Vec<_>>();
+
+        let mut container_responses = Vec::with_capacity(tasks.len());
+        for task in tasks {
+            let allocation = task
                 .await
+                .map_err(|err| tonic::Status::internal(format!("allocate task panicked: {err}")))?
                 .inspect_err(|err| tracing::warn!(%err, "allocate failed"))
                 .map_err(|err| tonic::Status::not_found(err.to_string()))?;
             container_responses.push(container_allocation_to_response(allocation));
@@ -422,8 +434,10 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
-    use super::*;
+    use k8s_device_plugin_core::test_util::StaticPlugin;
     use tokio_stream::StreamExt;
+
+    use super::*;
 
     #[test]
     fn kubelet_socket_path() {
@@ -559,39 +573,6 @@ mod tests {
         assert_eq!(spec.permissions, "rw");
     }
 
-    struct StaticDevicePlugin(Vec<Device>);
-
-    impl K8sDevicePlugin for StaticDevicePlugin {}
-
-    #[tonic::async_trait]
-    impl DeviceDiscovery for StaticDevicePlugin {
-        async fn discover(&self) -> Vec<Device> {
-            self.0.clone()
-        }
-    }
-
-    #[tonic::async_trait]
-    impl DeviceAllocator for StaticDevicePlugin {
-        async fn allocate(
-            &self,
-            device_ids: &[String],
-        ) -> Result<ContainerAllocation, AllocationError> {
-            let mut device_paths = Vec::new();
-            for id in device_ids {
-                let device = self
-                    .0
-                    .iter()
-                    .find(|d| &d.id == id)
-                    .ok_or_else(|| AllocationError::DeviceNotFound(id.clone()))?;
-                device_paths.extend(device.paths.iter().cloned());
-            }
-            Ok(ContainerAllocation {
-                device_paths,
-                ..Default::default()
-            })
-        }
-    }
-
     fn make_service() -> DevicePluginService {
         let device = Device {
             id: "dev-0".to_string(),
@@ -602,7 +583,7 @@ mod tests {
                 permissions: DevicePermissions::rdwr(),
             }],
         };
-        DevicePluginService::new(StaticDevicePlugin(vec![device]))
+        DevicePluginService::new(StaticPlugin(vec![device]))
     }
 
     #[tokio::test]
@@ -755,6 +736,62 @@ mod tests {
             container_response.cdi_devices[0].name,
             "example.com/widget=widget-0"
         );
+    }
+
+    struct SlowPlugin;
+
+    #[tonic::async_trait]
+    impl DeviceDiscovery for SlowPlugin {
+        async fn discover(&self) -> Vec<Device> {
+            vec![]
+        }
+    }
+
+    #[tonic::async_trait]
+    impl DeviceAllocator for SlowPlugin {
+        async fn allocate(
+            &self,
+            device_ids: &[String],
+        ) -> Result<ContainerAllocation, AllocationError> {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            Ok(ContainerAllocation {
+                envs: HashMap::from([("DEVICE_IDS".to_string(), device_ids.join(","))]),
+                ..Default::default()
+            })
+        }
+    }
+
+    impl K8sDevicePlugin for SlowPlugin {}
+
+    #[tokio::test]
+    async fn allocate_runs_containers_concurrently_and_preserves_order() {
+        use v1beta1::DevicePlugin as _;
+
+        let service = DevicePluginService::new(SlowPlugin);
+        let container_requests = (0..5)
+            .map(|i| v1beta1::ContainerAllocateRequest {
+                devices_ids: vec![format!("dev-{i}")],
+            })
+            .collect::<Vec<_>>();
+        let request = tonic::Request::new(v1beta1::AllocateRequest { container_requests });
+
+        let start = std::time::Instant::now();
+        let response = service.allocate(request).await.unwrap().into_inner();
+        let elapsed = start.elapsed();
+
+        // 5 containers x 20ms sleep each; concurrent execution should take
+        // much less than the 100ms a sequential loop would need.
+        assert!(
+            elapsed < Duration::from_millis(80),
+            "allocate took {elapsed:?}, looks sequential"
+        );
+
+        for (i, container_response) in response.container_responses.iter().enumerate() {
+            assert_eq!(
+                container_response.envs.get("DEVICE_IDS"),
+                Some(&format!("dev-{i}"))
+            );
+        }
     }
 
     #[tokio::test]
