@@ -4,3 +4,5 @@
 .dolt/
 *.db
 .beads-credential-key
+# br doctor per-run artifacts
+.doctor/
