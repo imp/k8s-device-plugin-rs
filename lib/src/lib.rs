@@ -87,7 +87,12 @@ impl DevicePlugin {
         loop {
             // Subscribe before registering so a fast kubelet disconnect is never missed.
             let kubelet_gone = self.service.kubelet_gone.notified();
-            self.register_with_retry().await?;
+            if let Err(err) = self.register_with_retry().await {
+                // Registration is permanently exhausted: abort the spawned server task
+                // so it doesn't keep serving RPCs against a listener nobody can reach.
+                server_handle.abort();
+                return Err(err);
+            }
             tokio::select! {
                 result = &mut server_handle => {
                     return result
@@ -112,6 +117,9 @@ impl DevicePlugin {
         max_attempts: u32,
         initial_delay: Duration,
     ) -> io::Result<()> {
+        if max_attempts == 0 {
+            return Err(io::Error::other("max_attempts must be at least 1"));
+        }
         let mut delay = initial_delay;
         for attempt in 1..=max_attempts {
             match self.register_at(kubelet_socket.clone()).await {
@@ -170,17 +178,31 @@ impl DevicePlugin {
     }
 }
 
+/// Default interval at which [`DevicePluginService`] re-polls [`DeviceDiscovery::discover`]
+/// to detect health/state changes while a `ListAndWatch` stream is open.
+const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
 pub struct DevicePluginService {
-    plugin: Box<dyn K8sDevicePlugin>,
+    plugin: Arc<dyn K8sDevicePlugin>,
     kubelet_gone: Arc<tokio::sync::Notify>,
+    poll_interval: Duration,
 }
 
 impl DevicePluginService {
     pub fn new<P: K8sDevicePlugin + 'static>(plugin: P) -> Self {
         Self {
-            plugin: Box::new(plugin),
+            plugin: Arc::new(plugin),
             kubelet_gone: Arc::new(tokio::sync::Notify::new()),
+            poll_interval: DEFAULT_POLL_INTERVAL,
         }
+    }
+
+    /// Overrides the default interval at which device state is re-polled for
+    /// `ListAndWatch` updates.
+    #[must_use]
+    pub fn with_poll_interval(mut self, poll_interval: Duration) -> Self {
+        self.poll_interval = poll_interval;
+        self
     }
 }
 
@@ -208,19 +230,33 @@ impl v1beta1::DevicePlugin for DevicePluginService {
     ) -> tonic::Result<tonic::Response<Self::ListAndWatchStream>> {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
 
-        let devices: Vec<_> = self
-            .plugin
-            .discover()
-            .await
-            .iter()
-            .map(device_to_proto)
-            .collect();
+        let mut last_devices = self.plugin.discover().await;
+        let response = v1beta1::ListAndWatchResponse {
+            devices: last_devices.iter().map(device_to_proto).collect(),
+        };
+        let _ = tx.send(Ok(response)).await;
+
+        let plugin = Arc::clone(&self.plugin);
         let kubelet_gone = Arc::clone(&self.kubelet_gone);
+        let poll_interval = self.poll_interval;
         tokio::spawn(async move {
-            let response = v1beta1::ListAndWatchResponse { devices };
-            let _ = tx.send(Ok(response)).await;
-            // Wait until kubelet closes the stream (tx receiver dropped)
-            tx.closed().await;
+            loop {
+                tokio::select! {
+                    () = tokio::time::sleep(poll_interval) => {
+                        let devices = plugin.discover().await;
+                        if devices != last_devices {
+                            let response = v1beta1::ListAndWatchResponse {
+                                devices: devices.iter().map(device_to_proto).collect(),
+                            };
+                            last_devices = devices;
+                            if tx.send(Ok(response)).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    () = tx.closed() => break,
+                }
+            }
             kubelet_gone.notify_one();
         });
 
@@ -272,12 +308,26 @@ impl v1beta1::DevicePlugin for DevicePluginService {
     }
 }
 
+/// Derives a filesystem-safe, collision-resistant socket name from a resource name.
+///
+/// Sanitization alone is not injective (e.g. "acme.com/gpu" and "acme_com/gpu" both
+/// sanitize to "acme_com_gpu"), so a deterministic hash of the *original* name is
+/// appended to guarantee distinct resource names never collide on the same path.
 fn sanitize_socket_name(name: &str) -> String {
-    name.replace(invalid_char, "_")
+    let sanitized = name.replace(invalid_char, "_");
+    format!("{sanitized}-{:016x}", fnv1a64(name.as_bytes()))
 }
 
 fn invalid_char(c: char) -> bool {
     !(c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    bytes.iter().fold(OFFSET_BASIS, |hash, &b| {
+        (hash ^ u64::from(b)).wrapping_mul(PRIME)
+    })
 }
 
 #[cfg(test)]
@@ -297,11 +347,35 @@ mod tests {
     fn register_uses_socket_filename_as_endpoint() {
         let plugin = DevicePlugin::new("example.com/device", make_service());
 
-        assert_eq!(
-            plugin.endpoint,
-            "/var/lib/kubelet/device-plugins/example_com_device"
+        let expected_prefix = "/var/lib/kubelet/device-plugins/example_com_device-";
+        assert!(
+            plugin.endpoint.starts_with(expected_prefix),
+            "endpoint {} should start with {expected_prefix}",
+            plugin.endpoint
         );
-        assert_eq!(plugin.registration_endpoint(), "example_com_device");
+        assert!(
+            plugin
+                .registration_endpoint()
+                .starts_with("example_com_device-")
+        );
+    }
+
+    #[test]
+    fn sanitize_socket_name_is_deterministic() {
+        assert_eq!(
+            sanitize_socket_name("example.com/device"),
+            sanitize_socket_name("example.com/device")
+        );
+    }
+
+    #[test]
+    fn sanitize_socket_name_does_not_collide_across_distinct_names() {
+        // These two names sanitize to the same "acme_com_gpu" prefix but must not
+        // collide once the disambiguating hash suffix is applied.
+        assert_ne!(
+            sanitize_socket_name("acme.com/gpu"),
+            sanitize_socket_name("acme_com/gpu")
+        );
     }
 
     #[test]
@@ -385,6 +459,85 @@ mod tests {
         assert_eq!(response.devices.len(), 1);
         assert_eq!(response.devices[0].id, "dev-0");
         assert_eq!(response.devices[0].health, v1beta1::HEALTHY);
+    }
+
+    struct DynamicDevicePlugin(Arc<std::sync::Mutex<Vec<Device>>>);
+
+    #[tonic::async_trait]
+    impl DeviceDiscovery for DynamicDevicePlugin {
+        async fn discover(&self) -> Vec<Device> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    #[tonic::async_trait]
+    impl DeviceAllocator for DynamicDevicePlugin {
+        async fn allocate(
+            &self,
+            _device_ids: &[String],
+        ) -> Result<ContainerAllocation, AllocationError> {
+            Ok(ContainerAllocation::default())
+        }
+    }
+
+    fn make_device(id: &str, health: Health) -> Device {
+        Device {
+            id: id.to_string(),
+            health,
+            paths: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn list_and_watch_pushes_update_when_devices_change() {
+        use v1beta1::DevicePlugin as _;
+
+        let devices = Arc::new(std::sync::Mutex::new(vec![make_device(
+            "dev-0",
+            Health::Healthy,
+        )]));
+        let service = DevicePluginService::new(DynamicDevicePlugin(Arc::clone(&devices)))
+            .with_poll_interval(Duration::from_millis(5));
+
+        let mut stream = service
+            .list_and_watch(tonic::Request::new(v1beta1::Empty {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let first = stream.next().await.unwrap().unwrap();
+        assert_eq!(first.devices[0].health, v1beta1::HEALTHY);
+
+        *devices.lock().unwrap() = vec![make_device("dev-0", Health::Unhealthy)];
+
+        let second = stream.next().await.unwrap().unwrap();
+        assert_eq!(second.devices[0].health, v1beta1::UNHEALTHY);
+    }
+
+    #[tokio::test]
+    async fn list_and_watch_does_not_repeat_unchanged_devices() {
+        use v1beta1::DevicePlugin as _;
+
+        let devices = Arc::new(std::sync::Mutex::new(vec![make_device(
+            "dev-0",
+            Health::Healthy,
+        )]));
+        let service = DevicePluginService::new(DynamicDevicePlugin(Arc::clone(&devices)))
+            .with_poll_interval(Duration::from_millis(5));
+
+        let mut stream = service
+            .list_and_watch(tonic::Request::new(v1beta1::Empty {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        stream.next().await.unwrap().unwrap();
+
+        let second = tokio::time::timeout(Duration::from_millis(50), stream.next()).await;
+        assert!(
+            second.is_err(),
+            "no update should be pushed while devices are unchanged"
+        );
     }
 
     #[tokio::test]
