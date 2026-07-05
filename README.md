@@ -1,0 +1,112 @@
+# k8s-device-plugin-rs
+
+A Rust framework for writing Kubernetes [device plugins](https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/device-plugins/) — the gRPC protocol kubelet uses to discover, health-check, and allocate custom hardware (GPUs, FPGAs, NICs, and similar) to pods.
+
+You implement one trait describing *your* device backend; the framework handles kubelet registration, the retry/re-registration lifecycle, and the `DevicePlugin` gRPC service itself.
+
+## Architecture
+
+| Crate | Role |
+|---|---|
+| `core` | Backend-facing abstractions: `DeviceDiscovery`, `DeviceAllocator`, `K8sDevicePlugin`, and the `Device`/`DevicePermissions`/`AllocationError` types. No gRPC or async runtime specifics — this is what a backend implements against. |
+| `proto` | Generated bindings for the `v1beta1` device-plugin gRPC protocol (via `tonic`/`prost`), plus the vendored `k8s.io/kubelet` proto submodule. |
+| `lib` | The framework itself: `DevicePlugin` (registration + lifecycle) and `DevicePluginService` (the gRPC service adapter that drives a `K8sDevicePlugin` backend). |
+| `test` | Shared test-only helpers (mock kubelet registration server, mock device-plugin client) used by `lib`'s integration tests. |
+
+## Quickstart
+
+Implement `DeviceDiscovery` and `DeviceAllocator` for your backend type, then opt into `K8sDevicePlugin` (a marker trait with optional, default-implemented hooks — see below):
+
+```rust
+use k8s_device_plugin_lib::{
+    AllocationError, ContainerAllocation, Device, DeviceAllocator, DeviceDiscovery,
+    DevicePlugin, DevicePluginService, K8sDevicePlugin,
+};
+
+struct MyBackend { /* ... */ }
+
+#[tonic::async_trait]
+impl DeviceDiscovery for MyBackend {
+    async fn discover(&self) -> Vec<Device> {
+        // Return every device this backend currently knows about, with health.
+        vec![]
+    }
+}
+
+#[tonic::async_trait]
+impl DeviceAllocator for MyBackend {
+    async fn allocate(&self, device_ids: &[String]) -> Result<ContainerAllocation, AllocationError> {
+        // Resolve device_ids to the host/container paths + permissions to mount.
+        Ok(ContainerAllocation::default())
+    }
+}
+
+impl K8sDevicePlugin for MyBackend {}
+
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    let service = DevicePluginService::new(MyBackend { /* ... */ });
+    let plugin = DevicePlugin::new("example.com/my-device", service);
+    plugin.run().await
+}
+```
+
+`plugin.run()` registers with kubelet, serves the gRPC service over a Unix socket under `/var/lib/kubelet/device-plugins/`, re-registers automatically if kubelet restarts, and re-polls `discover()` on an interval (default 5s, override with `DevicePluginService::with_poll_interval`) so `ListAndWatch` reports health/inventory changes as they happen.
+
+A complete, runnable version of this — including the optional hooks below — lives in [`lib/examples/example_plugin.rs`](lib/examples/example_plugin.rs):
+
+```bash
+cargo run --example example_plugin
+```
+
+This needs a reachable kubelet device-plugin registration socket to actually register (e.g. inside a kind/minikube node, or as a DaemonSet); outside that environment it fails fast with a clear I/O error instead of hanging.
+
+### Optional hooks
+
+`K8sDevicePlugin` provides two optional, default-implemented hooks beyond discovery and allocation. Override the hook *and* its matching availability flag together — the framework reports the flags to kubelet via `GetDevicePluginOptions`:
+
+```rust
+impl K8sDevicePlugin for MyBackend {
+    fn pre_start_required(&self) -> bool {
+        true
+    }
+
+    async fn pre_start_container(&self, device_ids: &[String]) -> Result<(), AllocationError> {
+        // e.g. reset the device before kubelet starts the container.
+        Ok(())
+    }
+
+    fn preferred_allocation_available(&self) -> bool {
+        true
+    }
+
+    async fn preferred_allocation(
+        &self,
+        available_device_ids: &[String],
+        must_include_device_ids: &[String],
+        size: usize,
+    ) -> Result<Vec<String>, AllocationError> {
+        // Choose `size` device IDs from `available_device_ids`, including
+        // every ID in `must_include_device_ids`.
+        Ok(vec![])
+    }
+}
+```
+
+Leave both hooks at their defaults (`false` / no-op / unavailable) if your device doesn't need a pre-start step or non-arbitrary allocation choice.
+
+## Local validation
+
+This repo uses [`mise`](https://mise.jdx.dev/) to mirror the CI checklist locally:
+
+```bash
+mise run ci     # fmt --check, clippy -D warnings, test (via cargo-nextest)
+```
+
+Or individually: `mise run fmt`, `mise run clippy`, `mise run test`.
+
+Building the `proto` crate requires `protoc` (the Protobuf compiler) on `PATH`.
+
+## Issue tracking
+
+Work is tracked locally with [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`/`brr`) — see `AGENTS.md` for the workflow. `.beads/` is git-ignored; issue state is local-only and not part of this repository.
