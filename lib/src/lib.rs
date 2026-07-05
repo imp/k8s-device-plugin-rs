@@ -221,7 +221,10 @@ impl v1beta1::DevicePlugin for DevicePluginService {
         &self,
         _request: tonic::Request<v1beta1::Empty>,
     ) -> tonic::Result<tonic::Response<v1beta1::DevicePluginOptions>> {
-        Ok(tonic::Response::new(v1beta1::DevicePluginOptions::default()))
+        Ok(tonic::Response::new(v1beta1::DevicePluginOptions {
+            pre_start_required: self.plugin.pre_start_required(),
+            get_preferred_allocation_available: self.plugin.preferred_allocation_available(),
+        }))
     }
 
     async fn list_and_watch(
@@ -265,10 +268,30 @@ impl v1beta1::DevicePlugin for DevicePluginService {
 
     async fn get_preferred_allocation(
         &self,
-        _request: tonic::Request<v1beta1::PreferredAllocationRequest>,
+        request: tonic::Request<v1beta1::PreferredAllocationRequest>,
     ) -> tonic::Result<tonic::Response<v1beta1::PreferredAllocationResponse>> {
-        let status = tonic::Status::unimplemented("GetPreferredAllocation not implemented");
-        Err(status)
+        let mut container_responses = Vec::new();
+        for container_request in request.into_inner().container_requests {
+            let size = usize::try_from(container_request.allocation_size).map_err(|_| {
+                tonic::Status::invalid_argument("allocation_size must be non-negative")
+            })?;
+            let device_ids = self
+                .plugin
+                .preferred_allocation(
+                    &container_request.available_device_i_ds,
+                    &container_request.must_include_device_i_ds,
+                    size,
+                )
+                .await
+                .map_err(|err| tonic::Status::failed_precondition(err.to_string()))?;
+            container_responses.push(v1beta1::ContainerPreferredAllocationResponse {
+                device_i_ds: device_ids,
+            });
+        }
+
+        Ok(tonic::Response::new(v1beta1::PreferredAllocationResponse {
+            container_responses,
+        }))
     }
 
     async fn allocate(
@@ -300,11 +323,14 @@ impl v1beta1::DevicePlugin for DevicePluginService {
 
     async fn pre_start_container(
         &self,
-        _request: tonic::Request<v1beta1::PreStartContainerRequest>,
+        request: tonic::Request<v1beta1::PreStartContainerRequest>,
     ) -> tonic::Result<tonic::Response<v1beta1::PreStartContainerResponse>> {
-        Err(tonic::Status::unimplemented(
-            "PreStartContainer not implemented",
-        ))
+        let device_ids = request.into_inner().devices_ids;
+        self.plugin
+            .pre_start_container(&device_ids)
+            .await
+            .map_err(|err| tonic::Status::failed_precondition(err.to_string()))?;
+        Ok(tonic::Response::new(v1beta1::PreStartContainerResponse {}))
     }
 }
 
@@ -405,6 +431,8 @@ mod tests {
 
     struct StaticDevicePlugin(Vec<Device>);
 
+    impl K8sDevicePlugin for StaticDevicePlugin {}
+
     #[tonic::async_trait]
     impl DeviceDiscovery for StaticDevicePlugin {
         async fn discover(&self) -> Vec<Device> {
@@ -462,6 +490,8 @@ mod tests {
     }
 
     struct DynamicDevicePlugin(Arc<std::sync::Mutex<Vec<Device>>>);
+
+    impl K8sDevicePlugin for DynamicDevicePlugin {}
 
     #[tonic::async_trait]
     impl DeviceDiscovery for DynamicDevicePlugin {
@@ -573,6 +603,147 @@ mod tests {
 
         let status = service.allocate(request).await.unwrap_err();
         assert_eq!(status.code(), tonic::Code::NotFound);
+    }
+
+    struct FullFeaturedPlugin;
+
+    #[tonic::async_trait]
+    impl DeviceDiscovery for FullFeaturedPlugin {
+        async fn discover(&self) -> Vec<Device> {
+            vec![]
+        }
+    }
+
+    #[tonic::async_trait]
+    impl DeviceAllocator for FullFeaturedPlugin {
+        async fn allocate(
+            &self,
+            _device_ids: &[String],
+        ) -> Result<ContainerAllocation, AllocationError> {
+            Ok(ContainerAllocation::default())
+        }
+    }
+
+    #[tonic::async_trait]
+    impl K8sDevicePlugin for FullFeaturedPlugin {
+        fn pre_start_required(&self) -> bool {
+            true
+        }
+
+        async fn pre_start_container(&self, device_ids: &[String]) -> Result<(), AllocationError> {
+            if device_ids.iter().any(|id| id == "broken") {
+                return Err(AllocationError::HookFailed("device reset failed".into()));
+            }
+            Ok(())
+        }
+
+        fn preferred_allocation_available(&self) -> bool {
+            true
+        }
+
+        async fn preferred_allocation(
+            &self,
+            available_device_ids: &[String],
+            _must_include_device_ids: &[String],
+            size: usize,
+        ) -> Result<Vec<String>, AllocationError> {
+            Ok(available_device_ids.iter().take(size).cloned().collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn get_device_plugin_options_reports_defaults_when_hooks_unimplemented() {
+        use v1beta1::DevicePlugin as _;
+
+        let service = make_service();
+        let options = service
+            .get_device_plugin_options(tonic::Request::new(v1beta1::Empty {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!options.pre_start_required);
+        assert!(!options.get_preferred_allocation_available);
+    }
+
+    #[tokio::test]
+    async fn get_device_plugin_options_reports_enabled_hooks() {
+        use v1beta1::DevicePlugin as _;
+
+        let service = DevicePluginService::new(FullFeaturedPlugin);
+        let options = service
+            .get_device_plugin_options(tonic::Request::new(v1beta1::Empty {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(options.pre_start_required);
+        assert!(options.get_preferred_allocation_available);
+    }
+
+    #[tokio::test]
+    async fn pre_start_container_default_is_a_no_op() {
+        use v1beta1::DevicePlugin as _;
+
+        let service = make_service();
+        let request = tonic::Request::new(v1beta1::PreStartContainerRequest {
+            devices_ids: vec!["dev-0".to_string()],
+        });
+
+        service.pre_start_container(request).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pre_start_container_surfaces_hook_failure() {
+        use v1beta1::DevicePlugin as _;
+
+        let service = DevicePluginService::new(FullFeaturedPlugin);
+        let request = tonic::Request::new(v1beta1::PreStartContainerRequest {
+            devices_ids: vec!["broken".to_string()],
+        });
+
+        let status = service.pre_start_container(request).await.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn get_preferred_allocation_default_is_unavailable() {
+        use v1beta1::DevicePlugin as _;
+
+        let service = make_service();
+        let request = tonic::Request::new(v1beta1::PreferredAllocationRequest {
+            container_requests: vec![v1beta1::ContainerPreferredAllocationRequest {
+                available_device_i_ds: vec!["dev-0".to_string()],
+                must_include_device_i_ds: vec![],
+                allocation_size: 1,
+            }],
+        });
+
+        let status = service.get_preferred_allocation(request).await.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn get_preferred_allocation_returns_chosen_devices() {
+        use v1beta1::DevicePlugin as _;
+
+        let service = DevicePluginService::new(FullFeaturedPlugin);
+        let request = tonic::Request::new(v1beta1::PreferredAllocationRequest {
+            container_requests: vec![v1beta1::ContainerPreferredAllocationRequest {
+                available_device_i_ds: vec!["dev-0".to_string(), "dev-1".to_string()],
+                must_include_device_i_ds: vec![],
+                allocation_size: 1,
+            }],
+        });
+
+        let response = service
+            .get_preferred_allocation(request)
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(response.container_responses.len(), 1);
+        assert_eq!(response.container_responses[0].device_i_ds, vec!["dev-0"]);
     }
 
     #[tokio::test]

@@ -34,12 +34,18 @@ pub struct ContainerAllocation {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AllocationError {
     DeviceNotFound(String),
+    PreferredAllocationUnavailable,
+    HookFailed(String),
 }
 
 impl fmt::Display for AllocationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::DeviceNotFound(id) => write!(f, "device not found: {id}"),
+            Self::PreferredAllocationUnavailable => {
+                write!(f, "preferred allocation is not available for this plugin")
+            }
+            Self::HookFailed(message) => write!(f, "hook failed: {message}"),
         }
     }
 }
@@ -47,15 +53,49 @@ impl fmt::Display for AllocationError {
 impl std::error::Error for AllocationError {}
 
 /// Full framework abstraction a device plugin backend implements.
-pub trait K8sDevicePlugin: DeviceDiscovery + DeviceAllocator {}
+///
+/// `pre_start_container` and `preferred_allocation` are optional hooks with safe
+/// defaults. Override a hook, and its matching availability flag, only if the
+/// backend needs kubelet to call it.
+#[async_trait]
+pub trait K8sDevicePlugin: DeviceDiscovery + DeviceAllocator {
+    /// Whether kubelet must call `pre_start_container` before starting each
+    /// container. Defaults to `false`.
+    fn pre_start_required(&self) -> bool {
+        false
+    }
 
-impl<T: DeviceDiscovery + DeviceAllocator> K8sDevicePlugin for T {}
+    /// Runs before kubelet starts a container using the given device IDs.
+    /// The default implementation does nothing.
+    async fn pre_start_container(&self, _device_ids: &[String]) -> Result<(), AllocationError> {
+        Ok(())
+    }
+
+    /// Whether this backend implements `preferred_allocation`. Defaults to `false`.
+    fn preferred_allocation_available(&self) -> bool {
+        false
+    }
+
+    /// Chooses `size` preferred device IDs from `available_device_ids` for one
+    /// container request, including every ID in `must_include_device_ids`.
+    /// Only called when `preferred_allocation_available` returns `true`.
+    async fn preferred_allocation(
+        &self,
+        _available_device_ids: &[String],
+        _must_include_device_ids: &[String],
+        _size: usize,
+    ) -> Result<Vec<String>, AllocationError> {
+        Err(AllocationError::PreferredAllocationUnavailable)
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     struct StaticPlugin(Vec<Device>);
+
+    impl K8sDevicePlugin for StaticPlugin {}
 
     #[async_trait]
     impl DeviceDiscovery for StaticPlugin {
