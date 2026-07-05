@@ -168,7 +168,10 @@ impl DeviceAllocator for ExampleWidgetPlugin {
                 .ok_or_else(|| AllocationError::DeviceNotFound(id.clone()))?;
             device_paths.extend(device.paths.iter().cloned());
         }
-        Ok(ContainerAllocation { device_paths })
+        Ok(ContainerAllocation {
+            device_paths,
+            ..Default::default()
+        })
     }
 }
 

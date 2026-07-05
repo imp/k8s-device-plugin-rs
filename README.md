@@ -95,6 +95,18 @@ impl K8sDevicePlugin for MyBackend {
 
 Leave both hooks at their defaults (`false` / no-op / unavailable) if your device doesn't need a pre-start step or non-arbitrary allocation choice.
 
+### Allocation artifacts beyond device paths
+
+`ContainerAllocation` isn't limited to `device_paths` (`/dev` nodes) — it also carries `mounts` (extra host bind-mounts, e.g. shared libraries), `envs` (environment variables, e.g. a `*_VISIBLE_DEVICES`-style variable), `annotations`, and `cdi_devices` (fully qualified [CDI](https://github.com/container-orchestrated-devices/container-device-interface) device names). All four default to empty, so use `..Default::default()` when you only need a subset:
+
+```rust
+Ok(ContainerAllocation {
+    device_paths,
+    envs: HashMap::from([("MY_VISIBLE_DEVICES".to_string(), device_ids.join(","))]),
+    ..Default::default()
+})
+```
+
 ## Observability
 
 The framework emits structured [`tracing`](https://docs.rs/tracing) events and spans — never raw `println!`/`eprintln!` — covering the registration lifecycle and every RPC handler. It doesn't install a subscriber itself (see `obs-library-facade`); your binary chooses one. The example plugin installs a plain formatting subscriber filtered by `RUST_LOG`:

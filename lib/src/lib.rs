@@ -23,6 +23,7 @@ pub use k8s_device_plugin_core::DeviceDiscovery;
 pub use k8s_device_plugin_core::DevicePath;
 pub use k8s_device_plugin_core::DevicePermissions;
 pub use k8s_device_plugin_core::Health;
+pub use k8s_device_plugin_core::HostMount;
 pub use k8s_device_plugin_core::K8sDevicePlugin;
 pub use registration::RegistrationClient;
 
@@ -55,6 +56,34 @@ fn device_path_to_spec(path: &DevicePath) -> v1beta1::DeviceSpec {
         host_path: path.host_path.to_string_lossy().into_owned(),
         container_path: path.container_path.to_string_lossy().into_owned(),
         permissions: path.permissions.to_string(),
+    }
+}
+
+fn host_mount_to_proto(mount: &HostMount) -> v1beta1::Mount {
+    v1beta1::Mount {
+        container_path: mount.container_path.to_string_lossy().into_owned(),
+        host_path: mount.host_path.to_string_lossy().into_owned(),
+        read_only: mount.read_only,
+    }
+}
+
+fn container_allocation_to_response(
+    allocation: ContainerAllocation,
+) -> v1beta1::ContainerAllocateResponse {
+    v1beta1::ContainerAllocateResponse {
+        devices: allocation
+            .device_paths
+            .iter()
+            .map(device_path_to_spec)
+            .collect(),
+        mounts: allocation.mounts.iter().map(host_mount_to_proto).collect(),
+        envs: allocation.envs,
+        annotations: allocation.annotations,
+        cdi_devices: allocation
+            .cdi_devices
+            .into_iter()
+            .map(|name| v1beta1::CdiDevice { name })
+            .collect(),
     }
 }
 
@@ -329,15 +358,7 @@ impl v1beta1::DevicePlugin for DevicePluginService {
                 .await
                 .inspect_err(|err| tracing::warn!(%err, "allocate failed"))
                 .map_err(|err| tonic::Status::not_found(err.to_string()))?;
-            let devices = allocation
-                .device_paths
-                .iter()
-                .map(device_path_to_spec)
-                .collect();
-            container_responses.push(v1beta1::ContainerAllocateResponse {
-                devices,
-                ..Default::default()
-            });
+            container_responses.push(container_allocation_to_response(allocation));
         }
 
         Ok(tonic::Response::new(v1beta1::AllocateResponse {
@@ -398,6 +419,7 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::path::PathBuf;
 
     use super::*;
@@ -563,7 +585,10 @@ mod tests {
                     .ok_or_else(|| AllocationError::DeviceNotFound(id.clone()))?;
                 device_paths.extend(device.paths.iter().cloned());
             }
-            Ok(ContainerAllocation { device_paths })
+            Ok(ContainerAllocation {
+                device_paths,
+                ..Default::default()
+            })
         }
     }
 
@@ -699,6 +724,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn allocate_maps_mounts_envs_annotations_and_cdi_devices() {
+        use v1beta1::DevicePlugin as _;
+
+        let service = DevicePluginService::new(FullFeaturedPlugin);
+        let request = tonic::Request::new(v1beta1::AllocateRequest {
+            container_requests: vec![v1beta1::ContainerAllocateRequest {
+                devices_ids: vec!["widget-0".to_string()],
+            }],
+        });
+
+        let response = service.allocate(request).await.unwrap().into_inner();
+        let container_response = &response.container_responses[0];
+
+        assert_eq!(container_response.mounts.len(), 1);
+        assert_eq!(container_response.mounts[0].host_path, "/opt/widget/lib");
+        assert!(container_response.mounts[0].read_only);
+
+        assert_eq!(
+            container_response.envs.get("WIDGET_VISIBLE_DEVICES"),
+            Some(&"0".to_string())
+        );
+        assert_eq!(
+            container_response
+                .annotations
+                .get("widget.example.com/pool"),
+            Some(&"a".to_string())
+        );
+        assert_eq!(
+            container_response.cdi_devices[0].name,
+            "example.com/widget=widget-0"
+        );
+    }
+
+    #[tokio::test]
     async fn allocate_unknown_device_returns_not_found() {
         use v1beta1::DevicePlugin as _;
 
@@ -728,7 +787,20 @@ mod tests {
             &self,
             _device_ids: &[String],
         ) -> Result<ContainerAllocation, AllocationError> {
-            Ok(ContainerAllocation::default())
+            Ok(ContainerAllocation {
+                mounts: vec![HostMount {
+                    host_path: PathBuf::from("/opt/widget/lib"),
+                    container_path: PathBuf::from("/opt/widget/lib"),
+                    read_only: true,
+                }],
+                envs: HashMap::from([("WIDGET_VISIBLE_DEVICES".to_string(), "0".to_string())]),
+                annotations: HashMap::from([(
+                    "widget.example.com/pool".to_string(),
+                    "a".to_string(),
+                )]),
+                cdi_devices: vec!["example.com/widget=widget-0".to_string()],
+                ..Default::default()
+            })
         }
     }
 

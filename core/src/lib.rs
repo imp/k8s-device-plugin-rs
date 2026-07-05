@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 
 mod device;
@@ -6,6 +8,7 @@ mod permissions;
 
 pub use device::Device;
 pub use device::DevicePath;
+pub use device::HostMount;
 pub use health::Health;
 pub use permissions::DevicePermissions;
 
@@ -24,9 +27,14 @@ pub trait DeviceAllocator: Send + Sync {
 }
 
 /// Artifacts to attach to a container as a result of an `Allocate` call.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ContainerAllocation {
     pub device_paths: Vec<DevicePath>,
+    pub mounts: Vec<HostMount>,
+    pub envs: HashMap<String, String>,
+    pub annotations: HashMap<String, String>,
+    /// Fully qualified CDI device names, e.g. `"vendor.com/gpu=gpudevice1"`.
+    pub cdi_devices: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -106,7 +114,10 @@ mod tests {
                     .ok_or_else(|| AllocationError::DeviceNotFound(id.clone()))?;
                 device_paths.extend(device.paths.iter().cloned());
             }
-            Ok(ContainerAllocation { device_paths })
+            Ok(ContainerAllocation {
+                device_paths,
+                ..Default::default()
+            })
         }
     }
 

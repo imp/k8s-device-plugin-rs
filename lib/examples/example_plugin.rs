@@ -12,6 +12,7 @@
 //! cargo run --example example_plugin
 //! ```
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -80,7 +81,14 @@ impl DeviceAllocator for ExampleWidgetPlugin {
                 .ok_or_else(|| AllocationError::DeviceNotFound(id.clone()))?;
             device_paths.extend(device.paths.iter().cloned());
         }
-        Ok(ContainerAllocation { device_paths })
+        // Real devices often need more than a /dev node -- e.g. an env var
+        // pointing the workload at which devices it was given.
+        let envs = HashMap::from([("EXAMPLE_WIDGET_DEVICES".to_string(), device_ids.join(","))]);
+        Ok(ContainerAllocation {
+            device_paths,
+            envs,
+            ..Default::default()
+        })
     }
 }
 
