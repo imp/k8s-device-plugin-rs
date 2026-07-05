@@ -4,7 +4,7 @@
 
 ## Beads Workflow Integration
 
-This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`/`bd`) for issue tracking. Issues are stored in `.beads/` and tracked in git.
+This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`/`bd`) for issue tracking. Issues are stored in `.beads/`, which is local-only and **not** tracked in git (see `.gitignore`).
 
 ### Essential Commands
 
@@ -48,11 +48,11 @@ br sync --status      # Check sync status
 **Before ending any session, run this checklist:**
 
 ```bash
-git status              # Check what changed
+git status              # Check what changed (code only — .beads/ is git-ignored)
 git add <files>         # Stage code changes
-br sync --flush-only    # Export beads changes to JSONL
-git commit -m "..."     # Commit everything
+git commit -m "..."     # Commit
 git push                # Push to remote
+br sync --flush-only    # Export beads changes to JSONL (local-only, not committed)
 ```
 
 ### Best Practices
@@ -61,6 +61,6 @@ git push                # Push to remote
 - Update status as you work (in_progress → closed)
 - Create new issues with `br create` when you discover tasks
 - Use descriptive titles and set appropriate priority/type
-- Always sync before ending session
+- Always run `br sync --flush-only` before ending session (local export only — `.beads/` is never committed)
 
 <!-- end-br-agent-instructions -->
