@@ -10,10 +10,18 @@ run = "cargo nextest run --workspace"
 # run in user's cwd, default is the project's base directory
 dir = "{{cwd}}"
 
+[tasks.fmt]
+description = "Check formatting"
+run = "cargo fmt --all --check"
+
 [tasks.clippy]
 description = "Lint with clippy --all-targets"
 env = { RUST_BACKTRACE = "1" }  # env vars for the script
-run = "cargo clippy --workspace --all-targets"
+run = "cargo clippy --workspace --all-targets -- -D warnings"
+
+[tasks.ci]
+description = "Run the full CI checklist locally: fmt, clippy, test"
+depends = ["fmt", "clippy", "test"]
 
 [tasks.lint]
 description = "Lint with clippy"
