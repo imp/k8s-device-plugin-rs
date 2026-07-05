@@ -1,5 +1,3 @@
-use std::fmt;
-
 use async_trait::async_trait;
 
 mod device;
@@ -31,26 +29,15 @@ pub struct ContainerAllocation {
     pub device_paths: Vec<DevicePath>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum AllocationError {
+    #[error("device not found: {0}")]
     DeviceNotFound(String),
+    #[error("preferred allocation is not available for this plugin")]
     PreferredAllocationUnavailable,
+    #[error("hook failed: {0}")]
     HookFailed(String),
 }
-
-impl fmt::Display for AllocationError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::DeviceNotFound(id) => write!(f, "device not found: {id}"),
-            Self::PreferredAllocationUnavailable => {
-                write!(f, "preferred allocation is not available for this plugin")
-            }
-            Self::HookFailed(message) => write!(f, "hook failed: {message}"),
-        }
-    }
-}
-
-impl std::error::Error for AllocationError {}
 
 /// Full framework abstraction a device plugin backend implements.
 ///
