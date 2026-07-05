@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "beads": {
+      "type": "stdio",
+      "command": "brr",
+      "args": [
+        "serve"
+      ],
+      "env": {}
+    }
+  }
+}
