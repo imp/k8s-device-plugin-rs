@@ -105,7 +105,11 @@ impl K8sDevicePlugin for ExampleWidgetPlugin {
         must_include_device_ids: &[String],
         size: usize,
     ) -> Result<Vec<String>, AllocationError> {
-        let mut chosen: Vec<String> = must_include_device_ids.to_vec();
+        let mut chosen = must_include_device_ids
+            .iter()
+            .take(size)
+            .cloned()
+            .collect::<Vec<_>>();
         for id in available_device_ids {
             if chosen.len() >= size {
                 break;

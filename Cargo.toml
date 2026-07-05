@@ -31,6 +31,7 @@ k8s-device-plugin-test = { path = "test" }
 large_futures = "warn"
 map_flatten = "warn"
 map_unwrap_or = "warn"
+redundant_type_annotations = "warn"
 unused_async = "warn"
 use_self = "warn"
 

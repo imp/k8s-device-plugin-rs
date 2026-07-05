@@ -36,6 +36,20 @@ fn device_to_proto(device: &Device) -> v1beta1::Device {
     }
 }
 
+/// Compares two device snapshots by content, ignoring order, so a backend whose
+/// `discover()` doesn't return devices in a stable order (e.g. backed by a
+/// `HashMap`) doesn't trigger spurious `ListAndWatch` updates every poll.
+fn devices_equal_ignoring_order(a: &[Device], b: &[Device]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut a_sorted = a.iter().collect::<Vec<_>>();
+    let mut b_sorted = b.iter().collect::<Vec<_>>();
+    a_sorted.sort_by(|x, y| x.id.cmp(&y.id));
+    b_sorted.sort_by(|x, y| x.id.cmp(&y.id));
+    a_sorted == b_sorted
+}
+
 fn device_path_to_spec(path: &DevicePath) -> v1beta1::DeviceSpec {
     v1beta1::DeviceSpec {
         host_path: path.host_path.to_string_lossy().into_owned(),
@@ -247,7 +261,7 @@ impl v1beta1::DevicePlugin for DevicePluginService {
                 tokio::select! {
                     () = tokio::time::sleep(poll_interval) => {
                         let devices = plugin.discover().await;
-                        if devices != last_devices {
+                        if !devices_equal_ignoring_order(&devices, &last_devices) {
                             let response = v1beta1::ListAndWatchResponse {
                                 devices: devices.iter().map(device_to_proto).collect(),
                             };
@@ -334,14 +348,28 @@ impl v1beta1::DevicePlugin for DevicePluginService {
     }
 }
 
+/// Linux's `sockaddr_un.sun_path` is 108 bytes including the NUL terminator;
+/// stay one byte under that as a conservative, portable budget.
+const MAX_SOCKET_PATH_LEN: usize = 107;
+
 /// Derives a filesystem-safe, collision-resistant socket name from a resource name.
 ///
 /// Sanitization alone is not injective (e.g. "acme.com/gpu" and "acme_com/gpu" both
 /// sanitize to "acme_com_gpu"), so a deterministic hash of the *original* name is
 /// appended to guarantee distinct resource names never collide on the same path.
+/// The human-readable sanitized part is truncated (never the hash) if needed so the
+/// full endpoint path — including [`v1beta1::DEVICE_PLUGIN_PATH`] — never exceeds
+/// the platform's Unix socket path limit.
 fn sanitize_socket_name(name: &str) -> String {
     let sanitized = name.replace(invalid_char, "_");
-    format!("{sanitized}-{:016x}", fnv1a64(name.as_bytes()))
+    let suffix = format!("-{:016x}", fnv1a64(name.as_bytes()));
+    let budget = MAX_SOCKET_PATH_LEN
+        .saturating_sub(v1beta1::DEVICE_PLUGIN_PATH.len())
+        .saturating_sub(suffix.len());
+    // `sanitized` is guaranteed pure ASCII (invalid_char maps everything else to
+    // '_'), so counting chars is equivalent to counting bytes here.
+    let truncated = sanitized.chars().take(budget).collect::<String>();
+    truncated + &suffix
 }
 
 fn invalid_char(c: char) -> bool {
@@ -401,6 +429,74 @@ mod tests {
         assert_ne!(
             sanitize_socket_name("acme.com/gpu"),
             sanitize_socket_name("acme_com/gpu")
+        );
+    }
+
+    #[test]
+    fn sanitize_socket_name_keeps_full_endpoint_within_socket_path_limit() {
+        let long_name = "example.com/a-very-long-custom-accelerator-resource-name-that-keeps-going";
+        let socket_name = sanitize_socket_name(long_name);
+        let endpoint_len = v1beta1::DEVICE_PLUGIN_PATH.len() + socket_name.len();
+
+        assert!(
+            endpoint_len <= MAX_SOCKET_PATH_LEN,
+            "endpoint length {endpoint_len} exceeds the socket path limit of {MAX_SOCKET_PATH_LEN}"
+        );
+        // The disambiguating hash suffix must survive truncation intact.
+        assert!(socket_name.ends_with(&format!("-{:016x}", fnv1a64(long_name.as_bytes()))));
+    }
+
+    #[test]
+    fn devices_equal_ignoring_order_treats_reordered_devices_as_equal() {
+        let a = vec![
+            make_device("dev-0", Health::Healthy),
+            make_device("dev-1", Health::Healthy),
+        ];
+        let b = vec![
+            make_device("dev-1", Health::Healthy),
+            make_device("dev-0", Health::Healthy),
+        ];
+
+        assert!(devices_equal_ignoring_order(&a, &b));
+    }
+
+    #[test]
+    fn devices_equal_ignoring_order_detects_real_changes() {
+        let a = vec![make_device("dev-0", Health::Healthy)];
+        let b = vec![make_device("dev-0", Health::Unhealthy)];
+
+        assert!(!devices_equal_ignoring_order(&a, &b));
+    }
+
+    #[tokio::test]
+    async fn list_and_watch_does_not_repeat_reordered_but_unchanged_devices() {
+        use v1beta1::DevicePlugin as _;
+
+        let devices = Arc::new(std::sync::Mutex::new(vec![
+            make_device("dev-0", Health::Healthy),
+            make_device("dev-1", Health::Healthy),
+        ]));
+        let service = DevicePluginService::new(DynamicDevicePlugin(Arc::clone(&devices)))
+            .with_poll_interval(Duration::from_millis(5));
+
+        let mut stream = service
+            .list_and_watch(tonic::Request::new(v1beta1::Empty {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        stream.next().await.unwrap().unwrap();
+
+        // Same devices, different order: must not be treated as a change.
+        *devices.lock().unwrap() = vec![
+            make_device("dev-1", Health::Healthy),
+            make_device("dev-0", Health::Healthy),
+        ];
+
+        let second = tokio::time::timeout(Duration::from_millis(50), stream.next()).await;
+        assert!(
+            second.is_err(),
+            "no update should be pushed when devices are merely reordered"
         );
     }
 
