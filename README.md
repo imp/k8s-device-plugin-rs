@@ -105,6 +105,13 @@ RUST_LOG=info cargo run --example example_plugin
 
 Because RPC handlers are wrapped in `#[tracing::instrument]` spans, any subscriber `Layer` you attach (a Prometheus exporter, `tracing-opentelemetry`, etc.) gets call counts and latencies for `Allocate`, `ListAndWatch`, `PreStartContainer`, and `GetPreferredAllocation` for free, without the framework needing its own metrics API.
 
+[`lib/examples/example_plugin_with_metrics.rs`](lib/examples/example_plugin_with_metrics.rs) shows this concretely: a small, framework-independent `RpcMetricsLayer` turns those spans into a Prometheus `IntCounterVec` and `HistogramVec`, served over a real `/metrics` endpoint:
+
+```bash
+cargo run --example example_plugin_with_metrics
+# then, while it's running: curl http://127.0.0.1:9184/metrics
+```
+
 ## Local validation
 
 This repo uses [`mise`](https://mise.jdx.dev/) to mirror the CI checklist locally:

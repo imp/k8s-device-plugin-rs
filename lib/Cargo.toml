@@ -19,6 +19,7 @@ k8s-device-plugin-proto.workspace = true
 
 [dev-dependencies]
 k8s-device-plugin-test.workspace = true
+prometheus_exporter.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }
 tracing-subscriber.workspace = true
