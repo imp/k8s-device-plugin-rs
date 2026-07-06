@@ -4,7 +4,7 @@
 
 ## Beads Workflow Integration
 
-This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`/`bd`) for issue tracking. Issues are stored in `.beads/`, which is local-only and **not** tracked in git (see `.gitignore`).
+This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`/`brr`/`bd`) for issue tracking. Issues are stored in `.beads/`, which is local-only and **not** tracked in git (see `.gitignore`).
 
 ### Essential Commands
 
