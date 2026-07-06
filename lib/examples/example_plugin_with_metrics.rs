@@ -14,7 +14,6 @@
 //!
 //! Then, while it's running against a real kubelet: `curl http://127.0.0.1:9184/metrics`
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -24,11 +23,8 @@ use k8s_device_plugin_lib::ContainerAllocation;
 use k8s_device_plugin_lib::Device;
 use k8s_device_plugin_lib::DeviceAllocator;
 use k8s_device_plugin_lib::DeviceDiscovery;
-use k8s_device_plugin_lib::DevicePath;
-use k8s_device_plugin_lib::DevicePermissions;
 use k8s_device_plugin_lib::DevicePlugin;
 use k8s_device_plugin_lib::DevicePluginService;
-use k8s_device_plugin_lib::Health;
 use k8s_device_plugin_lib::K8sDevicePlugin;
 use prometheus_exporter::prometheus::HistogramOpts;
 use prometheus_exporter::prometheus::HistogramVec;
@@ -131,18 +127,9 @@ struct ExampleWidgetPlugin {
 
 impl ExampleWidgetPlugin {
     fn new() -> Self {
-        let devices = vec![Device {
-            id: "widget-0".to_string(),
-            health: Health::Healthy,
-            paths: vec![DevicePath {
-                host_path: PathBuf::from("/dev/widget-0"),
-                container_path: PathBuf::from("/dev/widget-0"),
-                permissions: DevicePermissions::rdwr(),
-            }],
-        }];
-        Self {
-            devices: Mutex::new(devices),
-        }
+        let device = Device::rdwr("widget-0", "/dev/widget-0");
+        let devices = Mutex::new(vec![device]);
+        Self { devices }
     }
 }
 

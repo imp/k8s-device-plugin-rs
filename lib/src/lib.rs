@@ -575,11 +575,7 @@ mod tests {
 
     #[test]
     fn converts_device_to_proto() {
-        let device = Device {
-            id: "dev-0".to_string(),
-            health: Health::Healthy,
-            paths: vec![],
-        };
+        let device = Device::new("dev-0");
         let proto = device_to_proto(&device);
         assert_eq!(proto.id, "dev-0");
         assert_eq!(proto.health, v1beta1::HEALTHY);
@@ -587,11 +583,7 @@ mod tests {
 
     #[test]
     fn converts_device_path_to_spec() {
-        let path = DevicePath {
-            host_path: PathBuf::from("/dev/mydev0"),
-            container_path: PathBuf::from("/dev/mydev0"),
-            permissions: DevicePermissions::rdwr(),
-        };
+        let path = DevicePath::rdwr("/dev/mydev0");
         let spec = device_path_to_spec(&path);
         assert_eq!(spec.host_path, "/dev/mydev0");
         assert_eq!(spec.container_path, "/dev/mydev0");
@@ -599,15 +591,7 @@ mod tests {
     }
 
     fn make_service() -> DevicePluginService {
-        let device = Device {
-            id: "dev-0".to_string(),
-            health: Health::Healthy,
-            paths: vec![DevicePath {
-                host_path: PathBuf::from("/dev/null"),
-                container_path: PathBuf::from("/dev/null"),
-                permissions: DevicePermissions::rdwr(),
-            }],
-        };
+        let device = Device::rdwr("dev-0", "/dev/null");
         DevicePluginService::new(StaticDevicePlugin::new(vec![device]))
     }
 
@@ -650,11 +634,7 @@ mod tests {
     }
 
     fn make_device(id: &str, health: Health) -> Device {
-        Device {
-            id: id.to_string(),
-            health,
-            paths: vec![],
-        }
+        Device::new(id).health(health)
     }
 
     #[tokio::test]

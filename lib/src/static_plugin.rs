@@ -16,17 +16,8 @@ use k8s_device_plugin_core::K8sDevicePlugin;
 /// kubelet.
 ///
 /// ```no_run
-/// # use k8s_device_plugin_lib::{Device, DevicePath, DevicePermissions, Health, StaticDevicePlugin};
-/// # use std::path::PathBuf;
-/// let devices = vec![Device {
-///     id: "widget-0".to_string(),
-///     health: Health::Healthy,
-///     paths: vec![DevicePath {
-///         host_path: PathBuf::from("/dev/widget0"),
-///         container_path: PathBuf::from("/dev/widget0"),
-///         permissions: DevicePermissions::rdwr(),
-///     }],
-/// }];
+/// # use k8s_device_plugin_lib::{Device, StaticDevicePlugin};
+/// let devices = vec![Device::rdwr("widget-0", "/dev/widget0")];
 /// let plugin = StaticDevicePlugin::new(devices);
 /// ```
 #[derive(Clone, Debug)]
@@ -86,22 +77,10 @@ impl K8sDevicePlugin for StaticDevicePlugin {}
 mod tests {
     use std::path::PathBuf;
 
-    use k8s_device_plugin_core::DevicePath;
-    use k8s_device_plugin_core::DevicePermissions;
-    use k8s_device_plugin_core::Health;
-
     use super::*;
 
     fn device_with_path(id: &str, host_path: PathBuf) -> Device {
-        Device {
-            id: id.to_string(),
-            health: Health::Healthy,
-            paths: vec![DevicePath {
-                host_path: host_path.clone(),
-                container_path: host_path,
-                permissions: DevicePermissions::rdwr(),
-            }],
-        }
+        Device::rdwr(id, host_path)
     }
 
     #[tokio::test]

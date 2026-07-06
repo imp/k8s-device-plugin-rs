@@ -126,15 +126,8 @@ mod tests {
     }
 
     fn make_plugin() -> StaticPlugin {
-        StaticPlugin(vec![Device {
-            id: "dev-0".to_string(),
-            health: Health::Healthy,
-            paths: vec![DevicePath {
-                host_path: "/dev/dev0".into(),
-                container_path: "/dev/dev0".into(),
-                permissions: DevicePermissions::rdwr(),
-            }],
-        }])
+        let dev = Device::rdwr("dev-0", "/dev/dev0");
+        StaticPlugin(vec![dev])
     }
 
     async fn use_backend<P: K8sDevicePlugin>(plugin: &P) -> Vec<Device> {

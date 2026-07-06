@@ -13,7 +13,6 @@
 //! ```
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Mutex;
 
 use k8s_device_plugin_lib::AllocationError;
@@ -21,8 +20,6 @@ use k8s_device_plugin_lib::ContainerAllocation;
 use k8s_device_plugin_lib::Device;
 use k8s_device_plugin_lib::DeviceAllocator;
 use k8s_device_plugin_lib::DeviceDiscovery;
-use k8s_device_plugin_lib::DevicePath;
-use k8s_device_plugin_lib::DevicePermissions;
 use k8s_device_plugin_lib::DevicePlugin;
 use k8s_device_plugin_lib::DevicePluginService;
 use k8s_device_plugin_lib::Health;
@@ -48,15 +45,7 @@ impl ExampleWidgetPlugin {
 }
 
 fn make_device(id: &str, health: Health) -> Device {
-    Device {
-        id: id.to_string(),
-        health,
-        paths: vec![DevicePath {
-            host_path: PathBuf::from(format!("/dev/{id}")),
-            container_path: PathBuf::from(format!("/dev/{id}")),
-            permissions: DevicePermissions::rdwr(),
-        }],
-    }
+    Device::rdwr(id, format!("/dev/{id}")).health(health)
 }
 
 #[tonic::async_trait]
