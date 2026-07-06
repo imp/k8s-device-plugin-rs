@@ -1,11 +1,9 @@
 {
   "mcpServers": {
-    "beads": {
+    "beads rust": {
       "type": "stdio",
       "command": "brr",
-      "args": [
-        "serve"
-      ],
+      "args": ["serve"],
       "env": {}
     }
   }
