@@ -12,6 +12,7 @@ You implement one trait describing *your* device backend; the framework handles 
 | `proto` | Generated bindings for the `v1beta1` device-plugin gRPC protocol (via `tonic`/`prost`), plus the vendored `k8s.io/kubelet` proto submodule. |
 | `lib` | The framework itself: `DevicePlugin` (registration + lifecycle) and `DevicePluginService` (the gRPC service adapter that drives a `K8sDevicePlugin` backend). |
 | `test` | Shared test-only helpers (mock kubelet registration server, mock device-plugin client) used by `lib`'s integration tests. |
+| `example` | A complete, deployable plugin built on `StaticDevicePlugin`, with a `Dockerfile` and K8s manifests — see [Deploying a real plugin](#deploying-a-real-plugin). |
 
 ## Quickstart
 
@@ -20,20 +21,11 @@ You implement one trait describing *your* device backend; the framework handles 
 If your devices are known up front and don't need custom discovery or allocation logic, `StaticDevicePlugin` needs no trait implementation at all — just a `Vec<Device>`. It re-checks that each device's host path still exists on disk before every `Allocate` call, so unplugged hardware fails cleanly instead of handing kubelet a stale path:
 
 ```rust
-use k8s_device_plugin_lib::{Device, DevicePath, DevicePermissions, DevicePlugin, DevicePluginService, Health, StaticDevicePlugin};
-use std::path::PathBuf;
+use k8s_device_plugin_lib::{Device, DevicePlugin, DevicePluginService, StaticDevicePlugin};
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let devices = vec![Device {
-        id: "widget-0".to_string(),
-        health: Health::Healthy,
-        paths: vec![DevicePath {
-            host_path: PathBuf::from("/dev/widget0"),
-            container_path: PathBuf::from("/dev/widget0"),
-            permissions: DevicePermissions::rdwr(),
-        }],
-    }];
+    let devices = vec![Device::rdwr("widget-0", "/dev/widget0")];
 
     let service = DevicePluginService::new(StaticDevicePlugin::new(devices));
     let plugin = DevicePlugin::new("example.com/widget", service);
@@ -136,6 +128,10 @@ Ok(ContainerAllocation {
     ..Default::default()
 })
 ```
+
+## Deploying a real plugin
+
+[`example/`](example/) is a complete, deployable device plugin built on `StaticDevicePlugin` — its own workspace crate with a `Dockerfile` (multi-stage, distroless static runtime) and a minimal K8s manifest set (`Namespace` + `DaemonSet` + `kustomization.yaml`) under `example/k8s/`. It's configured entirely through env vars (`RESOURCE_NAME`, `DEVICE_PATHS`), so forking it means editing the DaemonSet YAML, not the source. See [`example/README.md`](example/README.md) for the build/push/deploy walkthrough.
 
 ## Observability
 

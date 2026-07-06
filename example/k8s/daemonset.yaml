@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: k8s-device-plugin-example
+  namespace: k8s-device-plugin-example
+  labels:
+    app: k8s-device-plugin-example
+spec:
+  selector:
+    matchLabels:
+      app: k8s-device-plugin-example
+  template:
+    metadata:
+      labels:
+        app: k8s-device-plugin-example
+    spec:
+      # Device plugins are node-local infrastructure kubelet depends on to
+      # schedule pods that request this resource -- don't let it get evicted
+      # under node pressure.
+      priorityClassName: system-node-critical
+      # Target only nodes that actually have the hardware. Left commented
+      # out here since "every node" is rarely what you want for a real
+      # device; uncomment and adjust to your labeling scheme.
+      # nodeSelector:
+      #   example.com/has-widget: "true"
+      # tolerations:
+      #   - key: example.com/has-widget
+      #     operator: Exists
+      #     effect: NoSchedule
+      containers:
+        - name: device-plugin
+          # Retarget with: kustomize edit set image
+          #   k8s-device-plugin-example=<registry>/k8s-device-plugin-example:<tag>
+          image: k8s-device-plugin-example:latest
+          env:
+            - name: RESOURCE_NAME
+              value: example.com/widget
+            - name: DEVICE_PATHS
+              value: /dev/widget0
+            - name: RUST_LOG
+              value: info
+          volumeMounts:
+            - name: device-plugins
+              mountPath: /var/lib/kubelet/device-plugins
+            - name: dev
+              mountPath: /dev
+      volumes:
+        - name: device-plugins
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+            type: Directory
+        - name: dev
+          hostPath:
+            path: /dev
+            type: Directory

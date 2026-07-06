@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["core", "lib", "proto", "test"]
+members = ["core", "example", "lib", "proto", "test"]
 
 
 [workspace.package]

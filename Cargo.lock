@@ -523,6 +523,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "k8s-device-plugin-example"
+version = "0.0.1"
+dependencies = [
+ "k8s-device-plugin-lib",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "k8s-device-plugin-lib"
 version = "0.0.1"
 dependencies = [
