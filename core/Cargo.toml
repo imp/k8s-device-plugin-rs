@@ -14,11 +14,5 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 
 
-[features]
-# Exposes test_util::StaticPlugin for downstream crates' tests to reuse
-# instead of maintaining their own copy of the same test double.
-test-util = []
-
-
 [lints]
 workspace = true

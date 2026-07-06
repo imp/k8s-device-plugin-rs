@@ -5,8 +5,6 @@ use async_trait::async_trait;
 mod device;
 mod health;
 mod permissions;
-#[cfg(any(test, feature = "test-util"))]
-pub mod test_util;
 
 pub use device::Device;
 pub use device::DevicePath;
@@ -93,7 +91,39 @@ pub trait K8sDevicePlugin: DeviceDiscovery + DeviceAllocator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::StaticPlugin;
+
+    struct StaticPlugin(Vec<Device>);
+
+    impl K8sDevicePlugin for StaticPlugin {}
+
+    #[async_trait]
+    impl DeviceDiscovery for StaticPlugin {
+        async fn discover(&self) -> Vec<Device> {
+            self.0.clone()
+        }
+    }
+
+    #[async_trait]
+    impl DeviceAllocator for StaticPlugin {
+        async fn allocate(
+            &self,
+            device_ids: &[String],
+        ) -> Result<ContainerAllocation, AllocationError> {
+            let mut device_paths = Vec::new();
+            for id in device_ids {
+                let device = self
+                    .0
+                    .iter()
+                    .find(|device| &device.id == id)
+                    .ok_or_else(|| AllocationError::DeviceNotFound(id.clone()))?;
+                device_paths.extend(device.paths.iter().cloned());
+            }
+            Ok(ContainerAllocation {
+                device_paths,
+                ..Default::default()
+            })
+        }
+    }
 
     fn make_plugin() -> StaticPlugin {
         StaticPlugin(vec![Device {

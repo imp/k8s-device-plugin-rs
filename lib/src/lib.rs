@@ -460,7 +460,6 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
 
-    use k8s_device_plugin_core::test_util::StaticPlugin;
     use tokio_stream::StreamExt;
 
     use super::*;
@@ -604,12 +603,12 @@ mod tests {
             id: "dev-0".to_string(),
             health: Health::Healthy,
             paths: vec![DevicePath {
-                host_path: PathBuf::from("/dev/mydev0"),
-                container_path: PathBuf::from("/dev/mydev0"),
+                host_path: PathBuf::from("/dev/null"),
+                container_path: PathBuf::from("/dev/null"),
                 permissions: DevicePermissions::rdwr(),
             }],
         };
-        DevicePluginService::new(StaticPlugin(vec![device]))
+        DevicePluginService::new(StaticDevicePlugin::new(vec![device]))
     }
 
     #[tokio::test]
@@ -726,7 +725,7 @@ mod tests {
         assert_eq!(response.container_responses[0].devices.len(), 1);
         assert_eq!(
             response.container_responses[0].devices[0].host_path,
-            "/dev/mydev0"
+            "/dev/null"
         );
     }
 
