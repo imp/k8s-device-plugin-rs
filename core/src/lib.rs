@@ -47,6 +47,10 @@ pub enum AllocationError {
     PreferredAllocationUnavailable,
     #[error("hook failed: {0}")]
     HookFailed(String),
+    /// A known device's host path is currently missing or inaccessible,
+    /// e.g. hardware that was unplugged after startup.
+    #[error("device unavailable: {0}")]
+    DeviceUnavailable(String),
 }
 
 /// Full framework abstraction a device plugin backend implements.

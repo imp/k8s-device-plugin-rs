@@ -26,8 +26,10 @@ pub use k8s_device_plugin_core::Health;
 pub use k8s_device_plugin_core::HostMount;
 pub use k8s_device_plugin_core::K8sDevicePlugin;
 pub use registration::RegistrationClient;
+pub use static_plugin::StaticDevicePlugin;
 
 mod registration;
+mod static_plugin;
 
 fn device_to_proto(device: &Device) -> v1beta1::Device {
     v1beta1::Device {
@@ -75,6 +77,7 @@ fn allocation_error_to_status(err: AllocationError) -> tonic::Status {
         AllocationError::DeviceNotFound(_) => tonic::Status::not_found(message),
         AllocationError::PreferredAllocationUnavailable => tonic::Status::unimplemented(message),
         AllocationError::HookFailed(_) => tonic::Status::failed_precondition(message),
+        AllocationError::DeviceUnavailable(_) => tonic::Status::unavailable(message),
     }
 }
 

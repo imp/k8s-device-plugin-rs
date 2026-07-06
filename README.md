@@ -15,6 +15,36 @@ You implement one trait describing *your* device backend; the framework handles 
 
 ## Quickstart
 
+### The fast path: a fixed device list
+
+If your devices are known up front and don't need custom discovery or allocation logic, `StaticDevicePlugin` needs no trait implementation at all — just a `Vec<Device>`. It re-checks that each device's host path still exists on disk before every `Allocate` call, so unplugged hardware fails cleanly instead of handing kubelet a stale path:
+
+```rust
+use k8s_device_plugin_lib::{Device, DevicePath, DevicePermissions, DevicePlugin, DevicePluginService, Health, StaticDevicePlugin};
+use std::path::PathBuf;
+
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    let devices = vec![Device {
+        id: "widget-0".to_string(),
+        health: Health::Healthy,
+        paths: vec![DevicePath {
+            host_path: PathBuf::from("/dev/widget0"),
+            container_path: PathBuf::from("/dev/widget0"),
+            permissions: DevicePermissions::rdwr(),
+        }],
+    }];
+
+    let service = DevicePluginService::new(StaticDevicePlugin::new(devices));
+    let plugin = DevicePlugin::new("example.com/widget", service);
+    plugin.run().await
+}
+```
+
+That's the whole plugin. Reach for a custom backend (below) once you need dynamic discovery, the optional hooks, or allocation logic beyond "does this path exist."
+
+### Custom backends
+
 Implement `DeviceDiscovery` and `DeviceAllocator` for your backend type, then opt into `K8sDevicePlugin` (a marker trait with optional, default-implemented hooks — see below):
 
 ```rust

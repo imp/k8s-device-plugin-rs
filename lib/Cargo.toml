@@ -7,7 +7,7 @@ repository.workspace = true
 
 [dependencies]
 hyper-util.workspace = true
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, features = ["fs", "time"] }
 tokio-stream.workspace = true
 tonic.workspace = true
 tower.workspace = true
