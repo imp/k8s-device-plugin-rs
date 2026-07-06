@@ -1,6 +1,6 @@
 use super::*;
 use hyper_util::rt::TokioIo;
-use std::path::PathBuf;
+use std::path::Path;
 
 use tokio::net::UnixStream;
 use tonic::transport::Endpoint;
@@ -13,8 +13,8 @@ pub struct RegistrationClient {
 }
 
 impl RegistrationClient {
-    pub async fn new(path: String) -> tonic::Result<Self> {
-        let socket_path = PathBuf::from(path);
+    pub async fn new(path: impl AsRef<Path>) -> tonic::Result<Self> {
+        let socket_path = path.as_ref().to_path_buf();
         let connector_path = socket_path.clone();
 
         // The URI host is ignored for Unix Domain Socket transport.

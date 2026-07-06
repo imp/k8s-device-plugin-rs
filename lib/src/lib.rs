@@ -67,6 +67,17 @@ fn host_mount_to_proto(mount: &HostMount) -> v1beta1::Mount {
     }
 }
 
+/// Maps an [`AllocationError`] to the `tonic::Status` code that best matches
+/// its semantics, consistently across every RPC handler that can return one.
+fn allocation_error_to_status(err: AllocationError) -> tonic::Status {
+    let message = err.to_string();
+    match err {
+        AllocationError::DeviceNotFound(_) => tonic::Status::not_found(message),
+        AllocationError::PreferredAllocationUnavailable => tonic::Status::unimplemented(message),
+        AllocationError::HookFailed(_) => tonic::Status::failed_precondition(message),
+    }
+}
+
 fn container_allocation_to_response(
     allocation: ContainerAllocation,
 ) -> v1beta1::ContainerAllocateResponse {
@@ -334,7 +345,7 @@ impl v1beta1::DevicePlugin for DevicePluginService {
                 )
                 .await
                 .inspect_err(|err| tracing::warn!(%err, "preferred_allocation hook failed"))
-                .map_err(|err| tonic::Status::failed_precondition(err.to_string()))?;
+                .map_err(allocation_error_to_status)?;
             container_responses.push(v1beta1::ContainerPreferredAllocationResponse {
                 device_i_ds: device_ids,
             });
@@ -352,7 +363,9 @@ impl v1beta1::DevicePlugin for DevicePluginService {
     ) -> tonic::Result<tonic::Response<v1beta1::AllocateResponse>> {
         // Each container's allocation is independent, so run them concurrently
         // instead of one-at-a-time -- spawn all tasks up front, then await in
-        // order so container_responses lines up with the request.
+        // order so container_responses lines up with the request. If any task
+        // fails, abort the rest instead of letting them keep running after
+        // we've already reported failure to kubelet.
         let tasks = request
             .into_inner()
             .container_requests
@@ -364,12 +377,22 @@ impl v1beta1::DevicePlugin for DevicePluginService {
             .collect::<Vec<_>>();
 
         let mut container_responses = Vec::with_capacity(tasks.len());
-        for task in tasks {
-            let allocation = task
-                .await
-                .map_err(|err| tonic::Status::internal(format!("allocate task panicked: {err}")))?
-                .inspect_err(|err| tracing::warn!(%err, "allocate failed"))
-                .map_err(|err| tonic::Status::not_found(err.to_string()))?;
+        let mut tasks = tasks.into_iter();
+        while let Some(task) = tasks.next() {
+            let allocation = match task.await {
+                Ok(Ok(allocation)) => allocation,
+                Ok(Err(err)) => {
+                    tracing::warn!(%err, "allocate failed");
+                    tasks.for_each(|task| task.abort());
+                    return Err(allocation_error_to_status(err));
+                }
+                Err(join_err) => {
+                    tasks.for_each(|task| task.abort());
+                    return Err(tonic::Status::internal(format!(
+                        "allocate task panicked: {join_err}"
+                    )));
+                }
+            };
             container_responses.push(container_allocation_to_response(allocation));
         }
 
@@ -388,7 +411,7 @@ impl v1beta1::DevicePlugin for DevicePluginService {
             .pre_start_container(&device_ids)
             .await
             .inspect_err(|err| tracing::warn!(%err, "pre_start_container hook failed"))
-            .map_err(|err| tonic::Status::failed_precondition(err.to_string()))?;
+            .map_err(allocation_error_to_status)?;
         Ok(tonic::Response::new(v1beta1::PreStartContainerResponse {}))
     }
 }
@@ -794,6 +817,72 @@ mod tests {
         }
     }
 
+    struct AbortAwarePlugin {
+        fail_on: String,
+        completed: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[tonic::async_trait]
+    impl DeviceDiscovery for AbortAwarePlugin {
+        async fn discover(&self) -> Vec<Device> {
+            vec![]
+        }
+    }
+
+    #[tonic::async_trait]
+    impl DeviceAllocator for AbortAwarePlugin {
+        async fn allocate(
+            &self,
+            device_ids: &[String],
+        ) -> Result<ContainerAllocation, AllocationError> {
+            if device_ids.first().map(String::as_str) == Some(self.fail_on.as_str()) {
+                return Err(AllocationError::DeviceNotFound(self.fail_on.clone()));
+            }
+            // Simulate slow work; if the task is aborted (as it should be once
+            // a sibling container fails), this sleep is cut short and
+            // `completed` is never incremented.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            self.completed
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(ContainerAllocation::default())
+        }
+    }
+
+    impl K8sDevicePlugin for AbortAwarePlugin {}
+
+    #[tokio::test]
+    async fn allocate_aborts_in_flight_tasks_when_one_container_fails() {
+        use v1beta1::DevicePlugin as _;
+
+        let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let service = DevicePluginService::new(AbortAwarePlugin {
+            fail_on: "bad".to_string(),
+            completed: Arc::clone(&completed),
+        });
+
+        let request = tonic::Request::new(v1beta1::AllocateRequest {
+            container_requests: vec![
+                v1beta1::ContainerAllocateRequest {
+                    devices_ids: vec!["bad".to_string()],
+                },
+                v1beta1::ContainerAllocateRequest {
+                    devices_ids: vec!["good".to_string()],
+                },
+            ],
+        });
+
+        let status = service.allocate(request).await.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::NotFound);
+
+        // Give the sibling task time to have finished if it weren't aborted.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            completed.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the slow sibling task should have been aborted, not left running"
+        );
+    }
+
     #[tokio::test]
     async fn allocate_unknown_device_returns_not_found() {
         use v1beta1::DevicePlugin as _;
@@ -937,7 +1026,7 @@ mod tests {
         });
 
         let status = service.get_preferred_allocation(request).await.unwrap_err();
-        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(status.code(), tonic::Code::Unimplemented);
     }
 
     #[tokio::test]
